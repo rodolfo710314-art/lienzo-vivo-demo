@@ -1227,6 +1227,7 @@ function detenerBucle() {
 
 function paso(ahora) {
   let huboInferencia = false;
+  let saltoEsteTurno = false;
   const dt = Math.min(Math.max((ahora - ultimoPaso) / 1000, 1 / 240), 0.25);
   ultimoPaso = ahora;
 
@@ -1255,6 +1256,7 @@ function paso(ahora) {
 
     if (!inferir) {
       nSaltadas++;
+      saltoEsteTurno = true;
       gobernar(ahora);
     } else {
     ultimaInferencia = ahora;
@@ -1318,8 +1320,8 @@ function paso(ahora) {
      este fotograma y no el del anterior. */
   if (midiendo && huboInferencia) {
     muestras.push({
-      red: msInferencia, dib: msDibujo, ocu: ocupacion,
-      esc: escalon, glifos: ultimasGlifos, pose: hayPose,
+      red: msInferencia, dib: msDibujo, ocu: ocupacion, sonda: msSonda,
+      esc: escalon, glifos: ultimasGlifos, pose: hayPose, salto: saltoEsteTurno,
     });
   }
 
@@ -1554,6 +1556,9 @@ function cerrarMedicion() {
   const ocu = muestras.map((m) => m.ocu);
   const esc = muestras.map((m) => m.esc);
   const gl  = muestras.map((m) => m.glifos);
+  const son = muestras.map((m) => m.sonda);
+  const nSalt = muestras.filter((m) => m.salto).length;
+  const nInf = n - nSalt;
   const pedido = new URLSearchParams(location.search).get('delegate');
   const fase = pedido?.toUpperCase() === 'GPU' ? 'pedido GPU' : 'pedido CPU (defecto)';
 
@@ -1562,15 +1567,27 @@ function cerrarMedicion() {
     `fase: ${fase} · delegado real: ${delegado}`,
     `aparato: ${navigator.userAgent}`,
     `lienzo: ${anchoCSS}x${altoCSS} css · dpr ${dpr} · celda ${celda}px · densidad ${DENSIDADES[config.densidad].nombre}`,
-    `ventana: ${seg.toFixed(1)} s · ${n} muestras · ${(n / seg).toFixed(1)} inferencias/s logradas`,
+    /* Antes esta línea decía «inferencias/s» y era falso: las muestras se
+       toman por COMPROBACIÓN, inferida o no. Las dos tasas se reportan ahora
+       por separado, porque la diferencia entre ellas ES el ahorro. */
+    `ventana: ${seg.toFixed(1)} s · ${n} comprobaciones (${(n / seg).toFixed(1)}/s)`
+      + ` · ${nInf} inferencias (${(nInf / seg).toFixed(1)}/s)`,
     `pose presente: ${Math.round((100 * conPose) / n)} % de las muestras`
       + (conPose === 0 ? '   <-- NADIE EN CUADRO: esta medicion no vale' : ''),
     `red        mediana ${mediana(red).toFixed(1)} ms · p95 ${percentil(red, 0.95).toFixed(1)} ms`,
     `pintar     mediana ${mediana(dib).toFixed(1)} ms · p95 ${percentil(dib, 0.95).toFixed(1)} ms`,
-    `sonda      ${msSonda.toFixed(2)} ms por comprobacion`,
-    `compuerta  ${nSaltadas} de ${nComprobadas} comprobaciones saltadas`
-      + ` (${nComprobadas ? Math.round((100 * nSaltadas) / nComprobadas) : 0} %)`
-      + ` · ruido ${mediaRes.toFixed(2)}±${desvRes.toFixed(2)}`,
+    `sonda      mediana ${mediana(son).toFixed(2)} ms por comprobacion`,
+    /* Contado DENTRO de la ventana. Antes se reportaban los contadores de
+       toda la sesión junto a medianas de 20 s: dos escalas en el mismo
+       informe, y el porcentaje no significaba lo que parecía. */
+    `compuerta  ${nSalt} de ${n} saltadas en la ventana`
+      + ` (${Math.round((100 * nSalt) / n)} %) · ruido ${mediaRes.toFixed(2)}±${desvRes.toFixed(2)}`,
+    /* El balance, que es la única cifra que dice si la compuerta vale la pena:
+       sin ella cada comprobación cuesta una inferencia; con ella, la sonda
+       siempre más la inferencia solo cuando pasa. */
+    `balance    sin compuerta ${mediana(red).toFixed(1)} ms/comprobacion`
+      + ` · con compuerta ${(mediana(son) + (nInf / n) * mediana(red)).toFixed(1)} ms`
+      + ` · ahorro ${Math.round(100 * (1 - (mediana(son) + (nInf / n) * mediana(red)) / mediana(red)))} %`,
     `ocupacion  mediana ${Math.round(100 * mediana(ocu))} % · max ${Math.round(100 * Math.max(...ocu))} %`,
     `escalon    ${Math.min(...esc)} -> ${Math.max(...esc)} (final ${esc[esc.length - 1]})`,
     `glifos     mediana ${Math.round(mediana(gl))}`,
