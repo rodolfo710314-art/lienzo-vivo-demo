@@ -222,6 +222,25 @@ const OCUPACION_ALTA   = 0.65; // por encima, degradar
 const OCUPACION_BAJA   = 0.40; // por debajo, recuperar
 const MUESTRAS_BAJAR   = 12;   // mediciones seguidas antes de degradar
 const MUESTRAS_SUBIR   = 36;   // el triple para recuperar: mejor corto que oscilando
+/* Compuerta de movimiento. Idea de Rodolfo: usar una parte pequeña del cuadro
+   como referencia para decidir si hace falta llamar al detector.
+
+   No abarata la inferencia —PoseLandmarker redimensiona su entrada a 256×256
+   fijos, así que los milisegundos los fija la red y no el tamaño de lo que
+   entra—. Lo que hace es EVITARLA: si nada se movió, la pose de antes sigue
+   valiendo y se ahorra la llamada entera.
+
+   Tapa un agujero real del retroceso al ralentí de más abajo, que solo se
+   activa cuando no hay NADIE en cuadro: una persona sentada quieta pagaba el
+   precio completo por redibujar la misma silueta. */
+const SONDA_W          = 40;   // 1 200 píxeles en vez de 300 000
+const SONDA_H          = 30;
+const SONDA_BLOQUE     = 5;    // rejilla de 8×6 bloques
+const SONDA_UMBRAL_MIN = 2.0;  // en unidades de luma; suelo por si el ruido es ínfimo
+const SONDA_K          = 4;    // desviaciones por encima del ruido para declarar movimiento
+const SONDA_ARRANQUE   = 20;   // comprobaciones de rodaje antes de fiarse del modelo
+const REFRESCO_MS      = 1000; // se infiere igual cada tanto, pase lo que pase
+
 const IDLE_MS          = 2500; // sin pose durante esto → inferencia al ralentí
 const INTERVALO_IDLE   = 200;  // 5 Hz mientras no haya nadie delante
 const DESVANECIDO_MS   = 380;  // la silueta se apaga en vez de dar un salto
@@ -1019,7 +1038,12 @@ function aplicarEscalon() {
    misma media móvil se contaba seis veces, así que las «12 mediciones
    seguidas» eran en realidad dos. */
 function gobernar(ahora) {
-  ocupacion = (msInferencia + msDibujo) / intervaloInferencia;
+  /* La sonda corre en CADA comprobación; la inferencia, solo en las que la
+     compuerta deja pasar. De ahí el factor `fraccionInfiere`: sin él, la
+     ocupación seguiría contando 50 ms por comprobación aunque la mayoría se
+     estuvieran saltando, y el gobernador degradaría por un gasto que ya no
+     existe. */
+  ocupacion = (msSonda + fraccionInfiere * msInferencia + msDibujo) / intervaloInferencia;
   if (ocupacion > OCUPACION_ALTA) { sobre++; bajo = 0; }
   else if (ocupacion < OCUPACION_BAJA) { bajo++; sobre = 0; }
   else { sobre = 0; bajo = 0; }
@@ -1031,6 +1055,102 @@ function gobernar(ahora) {
   } else if (bajo >= MUESTRAS_SUBIR && escalon > 0) {
     escalon--; bajo = 0; ultimoCambio = ahora; aplicarEscalon();
   }
+}
+
+/* ═══ Compuerta de movimiento ════════════════════════════════════════════
+   Se compara por BLOQUES y no píxel a píxel, y se resta la mediana de los
+   cambios antes de decidir. Ese detalle es el que hace la compuerta usable:
+   cuando el autoexposición de la cámara sube el brillo de todo el cuadro,
+   todos los bloques cambian por igual y la mediana absorbe ese desplazamiento
+   global; un brazo que se mueve altera unos pocos bloques y sobresale por
+   encima. Se toma el MÁXIMO del residuo y no la suma, para que mover solo una
+   mano dispare igual que mover el cuerpo entero.
+
+   El umbral no es una constante: se estima sobre el ruido que de verdad tiene
+   este sensor, como media más K desviaciones del residuo observado.
+
+   La primera versión rastreaba el PISO —el mínimo del residuo— y estaba mal.
+   Medido: con un ruido de ±8 unidades de luma, plausible en interior, la
+   compuerta disparaba en 25 de 40 comprobaciones con la escena quieta; a ±15,
+   en 35 de 40. El motivo es que el residuo es un MÁXIMO sobre 48 bloques, un
+   estadístico con cola alta: un umbral apoyado en su mínimo queda por debajo
+   de casi toda la distribución. Lo encontró un test, no el ojo.
+
+   El modelo de ruido se alimenta SOLO de las comprobaciones que da por
+   quietas. Si también se alimentara de los movimientos reales, cada gesto
+   subiría el umbral y la compuerta acabaría ciega. El precio es el rodaje:
+   durante las primeras SONDA_ARRANQUE comprobaciones aprende de todo, así que
+   si el usuario se mueve justo entonces el umbral arranca alto — el refresco
+   forzado cubre ese hueco.                                                */
+const NB_X = Math.floor(SONDA_W / SONDA_BLOQUE);
+const NB_Y = Math.floor(SONDA_H / SONDA_BLOQUE);
+const N_BLOQUES = NB_X * NB_Y;
+
+let sondaCtx2 = null;
+let bloquesPrev = null;
+const bloques = new Float32Array(N_BLOQUES);
+const deltas = new Float32Array(N_BLOQUES);
+let mediaRes = 0, desvRes = 0, nRuido = 0;
+let msSonda = 0;
+let nComprobadas = 0, nSaltadas = 0;
+let fraccionInfiere = 1;
+
+function prepararCompuerta() {
+  const c = document.createElement('canvas');
+  c.width = SONDA_W; c.height = SONDA_H;
+  sondaCtx2 = c.getContext('2d', { willReadFrequently: true, alpha: false });
+  bloquesPrev = null;
+  mediaRes = 0; desvRes = 0; nRuido = 0;
+}
+
+/* La DECISIÓN está separada de la captura a propósito: así se puede probar con
+   cuadros construidos a mano —ruido de sensor, un cambio global de exposición,
+   un solo bloque que se mueve— sin necesitar cámara ni navegador. Ver
+   tests/halftone-rasterizador.test.js. */
+function decidirMovimiento(d) {
+  bloques.fill(0);
+  for (let y = 0; y < NB_Y * SONDA_BLOQUE; y++) {
+    const by = ((y / SONDA_BLOQUE) | 0) * NB_X;
+    for (let x = 0; x < NB_X * SONDA_BLOQUE; x++) {
+      const i = (y * SONDA_W + x) * 4;
+      // Luma aproximada con enteros: sobra precisión para detectar movimiento.
+      bloques[by + ((x / SONDA_BLOQUE) | 0)] += (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
+    }
+  }
+  const porBloque = SONDA_BLOQUE * SONDA_BLOQUE;
+  for (let k = 0; k < N_BLOQUES; k++) bloques[k] /= porBloque;
+
+  if (!bloquesPrev) { bloquesPrev = Float32Array.from(bloques); return true; }
+
+  for (let k = 0; k < N_BLOQUES; k++) deltas[k] = Math.abs(bloques[k] - bloquesPrev[k]);
+  bloquesPrev.set(bloques);
+
+  // La mediana de los cambios ES el desplazamiento global de iluminación.
+  const orden = Float32Array.from(deltas).sort();
+  const global = orden[N_BLOQUES >> 1];
+  let residuo = 0;
+  for (let k = 0; k < N_BLOQUES; k++) {
+    const r = deltas[k] - global;
+    if (r > residuo) residuo = r;
+  }
+
+  const umbral = nRuido < 3
+    ? Infinity                                        // sin modelo aún: no decidir movimiento
+    : Math.max(SONDA_UMBRAL_MIN, mediaRes + SONDA_K * desvRes);
+  const movio = residuo > umbral;
+
+  if (!movio || nRuido < SONDA_ARRANQUE) {
+    nRuido++;
+    mediaRes += (residuo - mediaRes) * 0.08;
+    desvRes  += (Math.abs(residuo - mediaRes) - desvRes) * 0.08;
+  }
+  return movio;
+}
+
+/** ¿Cambió algo desde la última comprobación? Captura y delega la decisión. */
+function seMovio() {
+  sondaCtx2.drawImage(video, 0, 0, SONDA_W, SONDA_H);
+  return decidirMovimiento(sondaCtx2.getImageData(0, 0, SONDA_W, SONDA_H).data);
 }
 
 /* ═══ Medición ═══════════════════════════════════════════════════════════
@@ -1085,7 +1205,8 @@ const percentil = (a, p) => {
    viejos de escritorio. */
 const usaRVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
 let asaRVFC = 0, asaRAF = 0;
-let ultimoTiempoVideo = -1, ultimaInferencia = 0, ultimaPose = 0, ultimoPaso = 0;
+let ultimoTiempoVideo = -1, ultimaInferencia = 0, ultimaComprobacion = 0;
+let ultimaPose = 0, ultimoPaso = 0;
 
 function programar() {
   if (!corriendo) return;
@@ -1109,9 +1230,33 @@ function paso(ahora) {
   const dt = Math.min(Math.max((ahora - ultimoPaso) / 1000, 1 / 240), 0.25);
   ultimoPaso = ahora;
 
+  /* Dos relojes y no uno. `ultimaComprobacion` marca el ritmo al que se MIRA
+     el cuadro; `ultimaInferencia`, la última vez que de verdad se llamó al
+     detector. Con un solo reloj, saltarse una inferencia dejaría la condición
+     de intervalo cumplida para siempre y se comprobaría en cada callback. */
   const cuadroNuevo = video.readyState >= 2 && video.currentTime !== ultimoTiempoVideo;
-  if (cuadroNuevo && ahora - ultimaInferencia >= intervaloInferencia) {
+  if (cuadroNuevo && ahora - ultimaComprobacion >= intervaloInferencia) {
     ultimoTiempoVideo = video.currentTime;
+    ultimaComprobacion = ahora;
+
+    /* La compuerta: 1 200 píxeles para decidir si vale la pena gastar los
+       ~50 ms del detector. Se fuerza la inferencia si todavía no hay ninguna
+       pose (la primera hay que encontrarla) y cada REFRESCO_MS pase lo que
+       pase, para que un falso «no se movió» no congele la silueta. */
+    const t0s = performance.now();
+    let movio = true;
+    try { movio = seMovio(); } catch { movio = true; }   // ante la duda, inferir
+    msSonda += (performance.now() - t0s - msSonda) * 0.1;
+    nComprobadas++;
+
+    const inferir = movio || !hayCopia || ahora - ultimaInferencia >= REFRESCO_MS;
+    fraccionInfiere += ((inferir ? 1 : 0) - fraccionInfiere) * 0.05;
+    huboInferencia = true;   // se muestrea por COMPROBACIÓN, inferida o no
+
+    if (!inferir) {
+      nSaltadas++;
+      gobernar(ahora);
+    } else {
     ultimaInferencia = ahora;
 
     const t0 = performance.now();
@@ -1143,7 +1288,7 @@ function paso(ahora) {
     }
     sucio = true;
     gobernar(ahora);
-    huboInferencia = true;
+    }
   }
 
   /* Al perder la pose la silueta se apaga en vez de desaparecer de golpe: un
@@ -1221,7 +1366,8 @@ async function arrancar() {
 
     corriendo = true;
     suspendido = false;
-    ultimoPaso = ultimaInferencia = ultimaPose = performance.now();
+    ultimoPaso = ultimaInferencia = ultimaComprobacion = ultimaPose = performance.now();
+    prepararCompuerta();
     ultimoTiempoVideo = -1;
     $arranque.textContent = 'Detener cámara';
     $arranque.dataset.activo = '1';
@@ -1254,7 +1400,9 @@ function detener(mensaje = 'Detenido. La cámara está liberada.', clase = '') {
      acabó degradada arranca la próxima ya en el escalón máximo, con las
      medias móviles y el rango de profundidad de otra persona en otra luz. */
   escalon = 0; sobre = 0; bajo = 0; ultimoCambio = 0;
-  msInferencia = 0; msDibujo = 0;
+  msInferencia = 0; msDibujo = 0; msSonda = 0;
+  nComprobadas = 0; nSaltadas = 0; fraccionInfiere = 1;
+  bloquesPrev = null; mediaRes = 0; desvRes = 0; nRuido = 0;
   zBajo = -0.4; zAlto = 0.4;
   modoPresencia = 'probando'; framesProbados = 0;
   aplicarEscalon();
@@ -1320,7 +1468,8 @@ document.addEventListener('visibilitychange', () => {
           if (!corriendo) { cerrarCamara(); return; }
           suspendido = false;
         }
-        ultimoPaso = ultimaInferencia = performance.now();
+        ultimoPaso = ultimaInferencia = ultimaComprobacion = performance.now();
+        prepararCompuerta();
         ultimoTiempoVideo = -1;
         programar();
       } catch (e) {
@@ -1352,6 +1501,7 @@ function refrescarDiagnostico(pintadas) {
   $diag.textContent =
     `${delegado} · ${celda}px · ${dpr}× · ${ESCALONES[escalon].hz}Hz · ` +
     `red ${msInferencia.toFixed(1)}ms · pintar ${msDibujo.toFixed(1)}ms · ` +
+    `sonda ${msSonda.toFixed(2)}ms · saltadas ${nComprobadas ? Math.round((100 * nSaltadas) / nComprobadas) : 0}% · ` +
     `ocupación ${(ocupacion * 100).toFixed(0)}% · ${pintadas} glifos · ` +
     `escalón ${escalon}/${ESCALONES.length - 1} · presencia ${modoPresencia} · ` +
     `glifos ${sondaEstado}`;
@@ -1417,6 +1567,10 @@ function cerrarMedicion() {
       + (conPose === 0 ? '   <-- NADIE EN CUADRO: esta medicion no vale' : ''),
     `red        mediana ${mediana(red).toFixed(1)} ms · p95 ${percentil(red, 0.95).toFixed(1)} ms`,
     `pintar     mediana ${mediana(dib).toFixed(1)} ms · p95 ${percentil(dib, 0.95).toFixed(1)} ms`,
+    `sonda      ${msSonda.toFixed(2)} ms por comprobacion`,
+    `compuerta  ${nSaltadas} de ${nComprobadas} comprobaciones saltadas`
+      + ` (${nComprobadas ? Math.round((100 * nSaltadas) / nComprobadas) : 0} %)`
+      + ` · ruido ${mediaRes.toFixed(2)}±${desvRes.toFixed(2)}`,
     `ocupacion  mediana ${Math.round(100 * mediana(ocu))} % · max ${Math.round(100 * Math.max(...ocu))} %`,
     `escalon    ${Math.min(...esc)} -> ${Math.max(...esc)} (final ${esc[esc.length - 1]})`,
     `glifos     mediana ${Math.round(mediana(gl))}`,
