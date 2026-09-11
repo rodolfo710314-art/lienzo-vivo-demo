@@ -100,6 +100,19 @@
       min-height: 3.2em; letter-spacing: 0.02em;
     }
 
+    #panel[hidden] { display: none; }
+    #panel {
+      display: flex; flex-direction: column; gap: 0.4rem;
+      width: min(100%, 42rem);
+    }
+    #informe {
+      width: 100%; min-height: 11rem; resize: vertical;
+      background: #0a1114; color: #90a4ae;
+      border: 1px solid var(--borde); border-radius: 6px; padding: 0.5rem;
+      font-family: ui-monospace, monospace; font-size: 0.68rem; line-height: 1.45;
+      -webkit-user-select: text; user-select: text;
+    }
+
     @media (prefers-reduced-motion: reduce) {
       button { transition: none; }
     }
@@ -121,10 +134,16 @@
     <button id="btn-tinta"    type="button">Tinta: verde</button>
     <button id="btn-espejo"   type="button" aria-pressed="true">Espejo: sí</button>
     <button id="btn-halo"     type="button" aria-pressed="false">Halo: no</button>
+    <button id="btn-medir"    type="button">Medir 20 s</button>
   </div>
 
   <p id="estado" role="status" aria-live="polite">Sin arrancar.</p>
   <p id="diagnostico" role="status" aria-live="off"></p>
+
+  <div id="panel" hidden>
+    <textarea id="informe" readonly aria-label="Informe de la medición, en texto plano"></textarea>
+    <div class="controles"><button id="btn-copiar" type="button">Copiar</button></div>
+  </div>
 
 <script type="module">
 /* ═══════════════════════════════════════════════════════════════════════
@@ -1014,6 +1033,40 @@ function gobernar(ahora) {
   }
 }
 
+/* ═══ Medición ═══════════════════════════════════════════════════════════
+   Un botón de copiar sobre la línea de diagnóstico daría la foto de un
+   instante, y esas cifras son medias móviles que oscilan: la foto diría más
+   del momento en que se pulsó que del aparato. Esto toma una VENTANA —una
+   muestra por inferencia, no por fotograma— y entrega medianas, un p95 y el
+   recorrido del escalón.
+
+   Dos de los campos existen para que la medición se verifique a sí misma y
+   no haya que creerse al que la tomó:
+
+     · la fracción de muestras con pose presente, porque medir una habitación
+       vacía da números preciosos y sin ningún significado — la inferencia
+       baja al ralentí y la ocupación se desploma;
+     · la tasa de inferencia REALMENTE lograda, que puede ser mucho menor que
+       la pedida si el aparato no da abasto. Sin ese dato, una ocupación baja
+       se lee como holgura cuando puede ser rendición.                     */
+const VENTANA_MS = 20000;
+let midiendo = false;
+let muestras = [];
+let t0Medicion = 0;
+let ultimasGlifos = 0;
+
+const mediana = (a) => {
+  if (!a.length) return 0;
+  const o = [...a].sort((x, y) => x - y);
+  const m = o.length >> 1;
+  return o.length % 2 ? o[m] : (o[m - 1] + o[m]) / 2;
+};
+const percentil = (a, p) => {
+  if (!a.length) return 0;
+  const o = [...a].sort((x, y) => x - y);
+  return o[Math.min(o.length - 1, Math.floor(p * o.length))];
+};
+
 /* ═══ Bucle ══════════════════════════════════════════════════════════════
    Nada de rAF infinito repintando lo mismo. Se infiere solo cuando el vídeo
    ha entregado un fotograma NUEVO —de ahí la comparación de `currentTime`,
@@ -1052,6 +1105,7 @@ function detenerBucle() {
 }
 
 function paso(ahora) {
+  let huboInferencia = false;
   const dt = Math.min(Math.max((ahora - ultimoPaso) / 1000, 1 / 240), 0.25);
   ultimoPaso = ahora;
 
@@ -1089,6 +1143,7 @@ function paso(ahora) {
     }
     sucio = true;
     gobernar(ahora);
+    huboInferencia = true;
   }
 
   /* Al perder la pose la silueta se apaga en vez de desaparecer de golpe: un
@@ -1108,10 +1163,19 @@ function paso(ahora) {
 
   if (sucio) {
     const t1 = performance.now();
-    const pintadas = dibujar(hayCopia ? poseVigente : null, atenuacion);
+    ultimasGlifos = dibujar(hayCopia ? poseVigente : null, atenuacion);
     msDibujo += (performance.now() - t1 - msDibujo) * 0.1;
     sucio = atenuacion > 0 && !hayPose;   // seguir mientras dure el desvanecido
-    refrescarDiagnostico(pintadas);
+    refrescarDiagnostico(ultimasGlifos);
+  }
+
+  /* Se muestrea después de dibujar, para que el recuento de glifos sea el de
+     este fotograma y no el del anterior. */
+  if (midiendo && huboInferencia) {
+    muestras.push({
+      red: msInferencia, dib: msDibujo, ocu: ocupacion,
+      esc: escalon, glifos: ultimasGlifos, pose: hayPose,
+    });
   }
 
   programar();
@@ -1124,6 +1188,10 @@ const $estilo    = document.getElementById('btn-estilo');
 const $tinta     = document.getElementById('btn-tinta');
 const $espejo    = document.getElementById('btn-espejo');
 const $halo      = document.getElementById('btn-halo');
+const $medir     = document.getElementById('btn-medir');
+const $panel     = document.getElementById('panel');
+const $informe   = document.getElementById('informe');
+const $copiar    = document.getElementById('btn-copiar');
 const $estado    = document.getElementById('estado');
 const $diag      = document.getElementById('diagnostico');
 
@@ -1315,6 +1383,75 @@ function avisarSonda() {
   else if (sondaEstado === 'inservible')
     anunciar('La sonda de glifos no funciona en este motor; la rampa va sin verificar.', 'aviso');
 }
+
+function cerrarMedicion() {
+  midiendo = false;
+  $medir.disabled = false;
+  $medir.textContent = 'Medir 20 s';
+  $panel.hidden = false;
+
+  const seg = (performance.now() - t0Medicion) / 1000;
+  const n = muestras.length;
+  if (!n) {
+    $informe.value = 'Sin muestras: el detector no llegó a correr en esta ventana. '
+                   + '¿Estaba la cámara en marcha?';
+    return;
+  }
+
+  const conPose = muestras.filter((m) => m.pose).length;
+  const red = muestras.map((m) => m.red);
+  const dib = muestras.map((m) => m.dib);
+  const ocu = muestras.map((m) => m.ocu);
+  const esc = muestras.map((m) => m.esc);
+  const gl  = muestras.map((m) => m.glifos);
+  const pedido = new URLSearchParams(location.search).get('delegate');
+  const fase = pedido?.toUpperCase() === 'GPU' ? 'pedido GPU' : 'pedido CPU (defecto)';
+
+  $informe.value = [
+    'LIENZO VIVO · medicion',
+    `fase: ${fase} · delegado real: ${delegado}`,
+    `aparato: ${navigator.userAgent}`,
+    `lienzo: ${anchoCSS}x${altoCSS} css · dpr ${dpr} · celda ${celda}px · densidad ${DENSIDADES[config.densidad].nombre}`,
+    `ventana: ${seg.toFixed(1)} s · ${n} muestras · ${(n / seg).toFixed(1)} inferencias/s logradas`,
+    `pose presente: ${Math.round((100 * conPose) / n)} % de las muestras`
+      + (conPose === 0 ? '   <-- NADIE EN CUADRO: esta medicion no vale' : ''),
+    `red        mediana ${mediana(red).toFixed(1)} ms · p95 ${percentil(red, 0.95).toFixed(1)} ms`,
+    `pintar     mediana ${mediana(dib).toFixed(1)} ms · p95 ${percentil(dib, 0.95).toFixed(1)} ms`,
+    `ocupacion  mediana ${Math.round(100 * mediana(ocu))} % · max ${Math.round(100 * Math.max(...ocu))} %`,
+    `escalon    ${Math.min(...esc)} -> ${Math.max(...esc)} (final ${esc[esc.length - 1]})`,
+    `glifos     mediana ${Math.round(mediana(gl))}`,
+    `glifos sonda: ${sondaEstado} · presencia: ${modoPresencia} · halo: ${haloActivo ? 'si' : 'no'}`,
+  ].join('\n');
+}
+
+$medir.addEventListener('click', () => {
+  if (!corriendo) { anunciar('Arranca la cámara antes de medir.', 'aviso'); return; }
+  muestras = [];
+  t0Medicion = performance.now();
+  midiendo = true;
+  $medir.disabled = true;
+  $panel.hidden = true;
+  anunciar('Midiendo. Muévete delante de la cámara: quieto, la inferencia baja al ralentí y la medida no sirve.');
+  const tic = () => {
+    if (!midiendo) return;
+    const queda = VENTANA_MS - (performance.now() - t0Medicion);
+    if (queda <= 0) { cerrarMedicion(); return; }
+    $medir.textContent = `Midiendo… ${Math.ceil(queda / 1000)} s`;
+    setTimeout(tic, 250);
+  };
+  tic();
+});
+
+$copiar.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText($informe.value);
+    $copiar.textContent = 'Copiado';
+  } catch {
+    $informe.select();
+    $copiar.textContent = 'Selecciónalo y copia a mano';
+  }
+  setTimeout(() => { $copiar.textContent = 'Copiar'; }, 2600);
+});
 
 $arranque.addEventListener('click', () => (corriendo ? detener() : arrancar()));
 
