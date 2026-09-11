@@ -1,0 +1,1377 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#000000" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='4' fill='%234dd0e1'/%3E%3Ccircle cx='8' cy='22' r='2.5' fill='%234dd0e1'/%3E%3Ccircle cx='24' cy='22' r='2.5' fill='%234dd0e1'/%3E%3Ccircle cx='16' cy='7' r='2' fill='%23ffd54f'/%3E%3C/svg%3E" />
+  <title>Halftone de pose — Lola la Bola</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --tinta: #4dd0e1;
+      --borde: #263238;
+      --apagado: #607d8b;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      background: #000; color: #cfd8dc;
+      font-family: system-ui, sans-serif;
+      height: 100%;
+    }
+    body {
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      justify-content: safe center;
+      gap: 0.6rem; padding: 0.6rem;
+      /* svh y no dvh ni vh. `dvh` es, por definición, la unidad que CAMBIA
+         cuando la barra del navegador se retrae, así que es justo la que
+         provoca el reflujo que se quiere evitar; `svh` es la estable (mide
+         con la barra desplegada, el caso más pequeño). El lienzo, de todas
+         formas, no se dimensiona desde CSS sino desde `redimensionar()`.
+         Corrige un comentario anterior que afirmaba lo contrario. */
+      min-height: 100svh;
+      /* `auto` y no `hidden`: los seis controles se parten en dos o tres
+         filas según el ancho y la fuente del sistema, y con `hidden` lo que
+         no cabe se recorta por los dos extremos sin forma de alcanzarlo —
+         empezando por la línea de diagnóstico, que son las cifras que este
+         banco existe para enseñar. `safe center` evita que el centrado
+         recorte por arriba cuando el contenido no cabe. */
+      overflow: auto;
+      -webkit-user-select: none; user-select: none;
+    }
+
+    header { text-align: center; }
+    h1 { font-size: 0.95rem; color: var(--tinta); font-weight: 600; }
+    header p { color: var(--apagado); font-size: 0.72rem; margin-top: 0.15rem; }
+
+    #lienzo {
+      background: #000;
+      display: block;
+      border: 1px solid var(--borde);
+      border-radius: 8px;
+    }
+
+    .controles {
+      display: flex; flex-wrap: wrap; justify-content: center;
+      gap: 0.35rem; max-width: 100%;
+    }
+    button {
+      background: #0d1417; color: #90a4ae;
+      border: 1px solid var(--borde); border-radius: 6px;
+      padding: 0.5rem 0.75rem; font-size: 0.78rem;
+      font-family: inherit; cursor: pointer;
+      /* Va en los botones, que son lo único que se toca. Suprime el zoom por
+         doble toque sobre ellos. (No son «los 300 ms»: ese retardo ya lo
+         elimina `width=device-width` en el viewport — el comentario anterior
+         era falso y además ponía la propiedad en el lienzo, que no tiene ni
+         un manejador de eventos.) */
+      touch-action: manipulation;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    button:hover:not(:disabled) { border-color: #37474f; color: #cfd8dc; }
+    button:focus-visible { outline: 2px solid var(--tinta); outline-offset: 2px; }
+    /* 0.6 y no 0.4: el botón principal pasa deshabilitado toda la descarga de
+       8.9 MB, que es justo cuando el usuario lo está mirando. A 0.4 quedaba
+       en torno a 2:1 de contraste. */
+    button:disabled { opacity: 0.6; cursor: default; }
+    button[aria-pressed="true"] { background: #12363d; color: var(--tinta); border-color: #1d5560; }
+    #btn-arranque { background: #12363d; color: var(--tinta); border-color: #1d5560; font-weight: 600; }
+    #btn-arranque[data-activo="1"] { background: #3d1212; color: #ef9a9a; border-color: #602020; }
+
+    #estado {
+      font-size: 0.74rem; color: var(--apagado);
+      text-align: center; min-height: 1.1em;
+      max-width: 42rem; line-height: 1.4;
+    }
+    #estado.error { color: #ef5350; }
+    #estado.aviso { color: #ffb300; }
+
+    #diagnostico {
+      font-family: ui-monospace, monospace; font-size: 0.66rem;
+      /* #455a64 daba 2.90:1 sobre negro y era el texto más pequeño de la
+         página: por debajo del 4.5:1 de AA, justo en las cifras que este
+         banco existe para enseñar. #78909c da 6.27:1. */
+      color: #78909c; text-align: center;
+      /* Reserva el alto de tres líneas desde el principio. `altoCromo()` mide
+         al arrancar, cuando esta línea está vacía; sin la reserva, el cromo
+         crecería al aparecer las cifras y el lienzo, ya dimensionado, se
+         saldría por abajo. */
+      min-height: 3.2em; letter-spacing: 0.02em;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      button { transition: none; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>◍ Halftone de pose</h1>
+    <p>Ponte delante de la cámara. Ningún fotograma sale del teléfono;
+       el motor de visión y el modelo sí se descargan de un CDN.</p>
+  </header>
+
+  <canvas id="lienzo" aria-label="Silueta de la pose dibujada con símbolos"></canvas>
+
+  <div class="controles">
+    <button id="btn-arranque" type="button" data-activo="0">Iniciar cámara</button>
+    <button id="btn-densidad" type="button">Densidad: media</button>
+    <button id="btn-estilo"   type="button">Estilo: mixto</button>
+    <button id="btn-tinta"    type="button">Tinta: verde</button>
+    <button id="btn-espejo"   type="button" aria-pressed="true">Espejo: sí</button>
+    <button id="btn-halo"     type="button" aria-pressed="false">Halo: no</button>
+  </div>
+
+  <p id="estado" role="status" aria-live="polite">Sin arrancar.</p>
+  <p id="diagnostico" role="status" aria-live="off"></p>
+
+<script type="module">
+/* ═══════════════════════════════════════════════════════════════════════
+   Halftone de pose — banco de laboratorio de Lola la Bola
+
+   Qué hace: toma los 33 puntos de la pose y los rasteriza como una malla de
+   glifos de peso creciente. Nunca toca los píxeles del vídeo; solo la
+   geometría. Por eso el coste no depende de la resolución de la cámara.
+
+   Regla energética del proyecto (CLAUDE.md §3): cada decisión de aquí abajo
+   se justifica contra el throttling térmico. Donde dos opciones empatan en
+   resultado, gana la que menos calienta.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Origen de las dependencias ─────────────────────────────────────────
+   ⚠️ CAPA 0: estas tres URL son la única salida a red de la página, y la
+   hacen NO apta para producción tal cual — pedirlas revela la IP del
+   usuario a jsDelivr y a Google, y la página no funciona sin cobertura.
+
+   Para llevarla a Capa 0 basta cambiar estas constantes: el repo ya tiene
+   el fileset vendorizado en `nebula/public/mediapipe-wasm/` (mismo patrón
+   que `nebula/components/GestureController.tsx`, que resuelve contra
+   '/mediapipe-wasm'). Falta únicamente alojar el .task junto a él.
+
+   Versión clavada a propósito: `@latest` en un CDN es una dependencia que
+   cambia bajo los pies sin que nadie lo pida.
+
+   Y ojo con dar por hecho que «se descarga una vez». Medido con curl sobre
+   las cabeceras reales: jsDelivr sirve con `immutable, max-age=31536000`,
+   pero el modelo de GCS —5,78 MB de los 8,88 totales— viene con
+   `cache-control: public, max-age=3600`. Una hora. Pasado ese plazo hace
+   falta red para revalidar (hay ETag, así que no se retransmite el cuerpo,
+   pero sí hace falta cobertura). Un banco llevado al campo sin datos y
+   arrancado dos horas después NO arranca. Sin service worker no hay forma
+   de evitarlo desde esta página.
+
+   Se fija 0.10.35 y no la 1.0.1 (jul-2026) porque es EXACTAMENTE la que hay
+   vendorizada en `nebula/public/mediapipe-wasm/`. El fileset WASM y el
+   `vision_bundle.mjs` tienen que ser de la misma versión, así que subir esta
+   constante obliga a revendorizar el fileset. Van juntos o no van.       */
+const VER_TASKS  = '0.10.35';
+const URL_MODULO = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${VER_TASKS}/vision_bundle.mjs`;
+const URL_WASM   = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${VER_TASKS}/wasm`;
+const URL_MODELO = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
+
+/* ── Ajustes ───────────────────────────────────────────────────────────── */
+const DENSIDADES = [
+  { nombre: 'baja',  celda: 18 },
+  { nombre: 'media', celda: 12 },
+  { nombre: 'alta',  celda: 8  },
+];
+const ESTILOS = ['mixto', 'cruces', 'circulos', 'triangulos', 'ascii'];
+const TINTAS  = ['verde', 'ambar', 'blanco'];
+
+/* Niveles de brillo. Cada nivel es UN cambio de `fillStyle` por fotograma;
+   el original hacía uno por celda (miles). Seis es un punto de partida
+   elegido a ojo, no medido: si aparecen bandas en un teléfono real, subirlo
+   cuesta una constante y seis cadenas de color más por fotograma. */
+const NIVELES = 6;
+const NIVEL_CALIENTE = 4;          // desde aquí se dibuja el halo
+
+const UMBRAL_PRESENCIA = 0.35;     // por debajo, el hueso no se dibuja
+const UMBRAL_PINTAR    = 0.03;     // por debajo, la celda queda vacía
+
+/* Fracción del radio que ocupa el difuminado del borde de cada cápsula. El
+   resto es meseta plana. Ver el comentario de `pintarHueso`: sin meseta, el
+   torso se dibuja como una X. */
+const BORDE_CAPSULA = 0.45;
+
+/* Gobernador térmico. La magnitud que vigila es la OCUPACIÓN: qué fracción
+   del tiempo de reloj se pasa la página calculando, no cuántos milisegundos
+   cuesta una llamada. La diferencia importa — comparar un coste por llamada
+   contra un presupuesto por fotograma degradaba la calidad al ralentí, cuando
+   la página usa una décima parte del presupuesto y no hay nada que recortar. */
+const OCUPACION_ALTA   = 0.65; // por encima, degradar
+const OCUPACION_BAJA   = 0.40; // por debajo, recuperar
+const MUESTRAS_BAJAR   = 12;   // mediciones seguidas antes de degradar
+const MUESTRAS_SUBIR   = 36;   // el triple para recuperar: mejor corto que oscilando
+const IDLE_MS          = 2500; // sin pose durante esto → inferencia al ralentí
+const INTERVALO_IDLE   = 200;  // 5 Hz mientras no haya nadie delante
+const DESVANECIDO_MS   = 380;  // la silueta se apaga en vez de dar un salto
+
+const config = {
+  densidad: 1,          // índice en DENSIDADES
+  estilo: 'mixto',
+  tinta: 'verde',
+  espejo: true,
+  halo: false,
+};
+
+/* ═══ Rampas de glifos ═══════════════════════════════════════════════════
+   El peso declarado es dónde cae ese símbolo en la escala 0→1 de cobertura.
+   No están espaciados de forma uniforme a propósito: la percepción de
+   densidad de un glifo no es lineal con su tinta.
+
+   La rampa `ascii` existe como red: sus caracteres están en cualquier fuente
+   del planeta. Las otras usan Dingbats y Formas Geométricas, que NO están
+   garantizados — de ahí la detección de cobertura de más abajo.            */
+const RAMPAS = {
+  cruces: [
+    [' ', 0], ['·', 0.10], ['‧', 0.18], ['⁺', 0.30], ['✚', 0.42],
+    ['✙', 0.54], ['✛', 0.66], ['✜', 0.78], ['✝', 0.89], ['†', 1.0],
+  ],
+  circulos: [
+    [' ', 0], ['·', 0.10], ['ˑ', 0.18], ['∘', 0.28], ['○', 0.38],
+    ['◯', 0.48], ['◎', 0.60], ['●', 0.72], ['◉', 0.86], ['■', 1.0],
+  ],
+  triangulos: [
+    [' ', 0], ['·', 0.10], ['ˑ', 0.18], ['▵', 0.30], ['△', 0.40],
+    ['▴', 0.52], ['▲', 0.64], ['◈', 0.76], ['◆', 0.88], ['■', 1.0],
+  ],
+  mixto: [
+    [' ', 0], ['·', 0.08], ['‧', 0.14], ['⁺', 0.20], ['○', 0.27],
+    ['✚', 0.34], ['◯', 0.41], ['✙', 0.48], ['△', 0.55], ['●', 0.62],
+    ['✛', 0.70], ['▲', 0.78], ['◉', 0.85], ['✜', 0.92], ['■', 1.0],
+  ],
+  ascii: [
+    [' ', 0], ['.', 0.10], [':', 0.20], ['-', 0.28], ['=', 0.38],
+    ['+', 0.48], ['*', 0.58], ['o', 0.66], ['O', 0.74], ['#', 0.84],
+    ['%', 0.92], ['@', 1.0],
+  ],
+};
+
+/* La familia debe ser la misma aquí y en la sonda de cobertura, o mediremos
+   una fuente y dibujaremos con otra. */
+const FAMILIA = 'ui-monospace, "DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono", monospace';
+
+/* ═══ Cobertura de glifos ════════════════════════════════════════════════
+   Motivo: media rampa son Dingbats (U+271A…U+271D) y Formas Geométricas.
+   Android no lleva esos glifos en su monoespaciada por defecto y depende de
+   la cadena de respaldo a Noto; si falla, el usuario ve cajas vacías o
+   nada. Dar la rampa por buena sin comprobarlo es exactamente el error que
+   CLAUDE.md documenta con el `.task`: creer la documentación en vez de
+   leer los bytes.
+
+   Cómo se comprueba: se dibuja cada glifo en un lienzo diminuto y se compara
+   su huella de píxeles con la de un no-carácter permanente, garantizado sin
+   glifo. Si coinciden, la fuente está pintando el .notdef y ese símbolo no
+   sirve.
+
+   Coste: como mucho 16 rasterizaciones de 24×24 por rampa —solo se sondea la
+   rampa activa, no las cinco—, y el lienzo de sonda y los resultados por
+   carácter se guardan, así que cambiar de estilo no vuelve a medir lo ya
+   medido. (Un comentario anterior decía «~35 rasterizaciones una sola vez»:
+   ni eran 35 ni era una sola vez, porque cada pulsación de Estilo rehacía
+   la sonda entera y creaba un lienzo nuevo.)                              */
+/* U+FFFF, escrito como escape y NO como carácter literal, a propósito.
+
+   Es el punto de código de referencia porque el estándar garantiza que jamás
+   se le asignará glifo: es un «no-carácter» permanente. Y esa misma propiedad
+   es la que rompe la compilación si se escribe literal — el analizador de
+   HTML (parse5, dentro de Vite) tiene prohibido aceptar no-caracteres en el
+   flujo de entrada y aborta con `noncharacter-in-input-stream`.
+
+   El escape lo mantiene fuera del HTML: solo existe cuando JavaScript
+   interpreta la cadena, ya en tiempo de ejecución. Si alguien lo «limpia»
+   pegando el carácter de verdad, el build se cae otra vez. */
+const CARACTER_AUSENTE  = '\uFFFF';
+const CARACTER_AUSENTE2 = '\uFFFE';   // el otro no-carácter permanente del plano 0
+
+function huellaGlifo(ctx2, ch, lado) {
+  ctx2.clearRect(0, 0, lado, lado);
+  ctx2.fillText(ch, lado / 2, lado / 2);
+  const datos = ctx2.getImageData(0, 0, lado, lado).data;
+  let suma = 0, disperso = 0;
+  for (let i = 3; i < datos.length; i += 4) {
+    const a = datos[i];
+    if (a) { suma += a; disperso = (disperso * 31 + i * a) >>> 0; }
+  }
+  return suma === 0 ? '0' : `${suma}:${disperso}`;
+}
+
+const LADO_SONDA = 24;
+let sondaCtx = null, sondaRef = null;
+const sondaCache = new Map();   // carácter → ¿lo tiene la fuente?
+
+/* La sonda descansa en un supuesto que hay que COMPROBAR, no dar por bueno:
+   que el motor dibuja igual todos los puntos de código sin glifo. Es cierto
+   cuando pinta el .notdef de la fuente; es falso en los motores que dibujan
+   una caja con los dígitos hexadecimales del punto de código dentro —Firefox
+   lo hace— o que sustituyen por LastResort, que da un símbolo distinto por
+   bloque Unicode. Ahí cada glifo ausente tiene una huella distinta de la
+   referencia, la rampa pasa entera y el usuario ve justo las cajas que la
+   sonda existe para evitar, con el diagnóstico afirmando «completa».
+
+   Por eso hay DOS referencias. Si U+FFFF y U+FFFE se dibujan distinto, la
+   igualdad de huellas no sirve como criterio en este motor y la sonda lo
+   declara: `no concluyente`. No se degrada la rampa —eso castigaría a un
+   Firefox que sí tiene las fuentes—, pero tampoco se afirma haber verificado
+   nada. La honestidad está en el diagnóstico, no en un recorte a ciegas. */
+function prepararSonda() {
+  if (sondaRef) return sondaRef;
+  const lienzoSonda = document.createElement('canvas');
+  lienzoSonda.width = lienzoSonda.height = LADO_SONDA;
+  sondaCtx = lienzoSonda.getContext('2d', { willReadFrequently: true });
+  sondaCtx.font = `${Math.round(LADO_SONDA * 0.8)}px ${FAMILIA}`;
+  sondaCtx.textAlign = 'center';
+  sondaCtx.textBaseline = 'middle';
+  sondaCtx.fillStyle = '#fff';
+
+  const a1 = huellaGlifo(sondaCtx, CARACTER_AUSENTE,  LADO_SONDA);
+  const a2 = huellaGlifo(sondaCtx, CARACTER_AUSENTE2, LADO_SONDA);
+  if (huellaGlifo(sondaCtx, 'M', LADO_SONDA) === a1) sondaRef = { motivo: 'inservible' };
+  else if (a1 !== a2) sondaRef = { motivo: 'no concluyente' };
+  else sondaRef = { ausente: a1 };
+  return sondaRef;
+}
+
+function filtrarRampa(rampa) {
+  const ref = prepararSonda();
+  if (ref.motivo) return { rampa, sonda: ref.motivo };
+
+  const buena = rampa.filter(([ch]) => {
+    if (ch === ' ') return true;
+    let tiene = sondaCache.get(ch);
+    if (tiene === undefined) {
+      const h = huellaGlifo(sondaCtx, ch, LADO_SONDA);
+      tiene = h !== ref.ausente && h !== '0';
+      sondaCache.set(ch, tiene);
+    }
+    return tiene;
+  });
+
+  /* Con menos de seis escalones el degradado se convierte en bandas. Antes
+     de entregar eso, es más honesto caer a ASCII, que siempre existe. */
+  if (buena.length < 6) return { rampa: RAMPAS.ascii, sonda: 'respaldo-ascii' };
+  return { rampa: buena, sonda: buena.length === rampa.length ? 'completa' : 'parcial' };
+}
+
+/* ═══ Tabla peso→glifo ═══════════════════════════════════════════════════
+   El original recorría la rampa entera por celda buscando el peso más
+   próximo: hasta 15 comparaciones × 9 605 celdas × 30 fps ≈ 4,3 millones de
+   comparaciones por segundo. Es una función pura de un solo argumento
+   acotado, o sea, una tabla.
+
+   9 605 es el máximo REAL, no una estimación: el lienzo tiene un tope de
+   900×675 y la celda un suelo de 8 px. Una versión anterior de este
+   comentario decía «17 000», casi el doble de lo alcanzable.              */
+const LUT_N = 128;
+let rampaActiva = [];
+let lutGlifos = new Uint8Array(LUT_N);
+let sondaEstado = '—';
+
+function construirLUT() {
+  const { rampa, sonda } = filtrarRampa(RAMPAS[config.estilo]);
+  rampaActiva = rampa;
+  sondaEstado = sonda;
+  for (let k = 0; k < LUT_N; k++) {
+    const w = k / (LUT_N - 1);
+    let mejor = 0, dif = Infinity;
+    for (let i = 0; i < rampa.length; i++) {
+      const d = Math.abs(rampa[i][1] - w);
+      if (d < dif) { dif = d; mejor = i; }
+    }
+    lutGlifos[k] = mejor;
+  }
+}
+
+/* ═══ Rejilla y búferes ══════════════════════════════════════════════════ */
+const lienzo = document.getElementById('lienzo');
+const ctx = lienzo.getContext('2d', { alpha: false, desynchronized: true });
+
+let anchoCSS = 0, altoCSS = 0;   // tamaño de dibujo, en px CSS
+let dpr = 1;
+let celda = DENSIDADES[config.densidad].celda;
+let cols = 0, filas = 0, nCeldas = 0;
+
+/* Todos los búferes se reservan al cambiar la rejilla y se reutilizan. Nada
+   de esto se asigna por fotograma: el recolector de basura en medio de un
+   bucle de cámara es un tirón visible y calor gratis. */
+let pesos      = new Float32Array(0);
+let marcaFrame = new Uint32Array(0);
+let tocadas    = new Int32Array(0);
+let ruido      = new Float32Array(0);
+let cubos      = [];   // NIVELES × Int32Array, índices de celda por nivel
+let cuboN      = new Int32Array(NIVELES);
+let nTocadas   = 0;
+let idFrame    = 1;
+
+function reservarRejilla() {
+  cols  = Math.max(1, Math.ceil(anchoCSS / celda));
+  filas = Math.max(1, Math.ceil(altoCSS  / celda));
+  nCeldas = cols * filas;
+
+  pesos      = new Float32Array(nCeldas);
+  marcaFrame = new Uint32Array(nCeldas);
+  tocadas    = new Int32Array(nCeldas);
+  ruido      = new Float32Array(nCeldas);
+  cubos      = Array.from({ length: NIVELES }, () => new Int32Array(nCeldas));
+  idFrame    = 1;
+
+  /* El dither es una función fija de (gx, gy). El original lo recalculaba con
+     dos senos y dos cosenos por celda y por fotograma para obtener siempre
+     el mismo número. */
+  for (let gy = 0; gy < filas; gy++) {
+    for (let gx = 0; gx < cols; gx++) {
+      /* Cifras corregidas: son 4 llamadas por celda y 9 605 celdas como
+        máximo, o sea 38 420 por FOTOGRAMA — 1,15 millones por segundo a
+        30 fps. Un comentario anterior decía «68 000 por segundo», que
+        mezclaba un recuento de celdas equivocado con la unidad equivocada. */
+     ruido[gy * cols + gx] =
+        (Math.sin(gx * 1.7 + gy * 2.3) * 0.5 + Math.cos(gx * 3.1 + gy * 1.9) * 0.3) * 0.075;
+    }
+  }
+}
+
+/* Alto de todo lo que NO es el lienzo. Se MIDE en vez de estimarse: en qué
+   número de filas se parten los seis controles depende del ancho, de la
+   fuente del sistema y del idioma. Una constante aquí —había un `190` fijo—
+   se queda corta en un teléfono estrecho y recorta la interfaz por los dos
+   extremos, empezando por la línea de diagnóstico. */
+function altoCromo() {
+  const cs = getComputedStyle(document.body);
+  const hueco = parseFloat(cs.rowGap) || 0;
+  const hijos = [...document.body.children];
+  let suma = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+  for (const el of hijos) if (el !== lienzo) suma += el.getBoundingClientRect().height;
+  return suma + hueco * Math.max(0, hijos.length - 1) + 8;
+}
+
+function redimensionar() {
+  const dispW = Math.min(window.innerWidth - 16, 900);
+  const dispH = Math.min(window.innerHeight - altoCromo(), 720);
+  const aspecto = 4 / 3;
+
+  /* Sin rama de corrección: `w = min(dispW, dispH·a)` ⇒ `h = w/a ≤ dispH`
+     siempre. Había un `if (h > dispH)` que no podía ejecutarse nunca y hacía
+     creer que el encaje contemplaba un caso inexistente. */
+  const w = Math.min(dispW, dispH * aspecto);
+  anchoCSS = Math.max(160, Math.floor(w));
+  altoCSS  = Math.max(120, Math.floor(w / aspecto));
+
+  /* DPR: el contenido son glifos vectoriales, así que más DPR = más nítido,
+     pero el coste de rasterizar texto crece con el CUADRADO del factor: en un
+     teléfono 3× son nueve veces el trabajo de relleno por fotograma.
+
+     El criterio es un APAÑO, y conviene decirlo: `(pointer: fine)` no
+     significa «enchufado a la corriente» — acierta en todos los portátiles,
+     que van a batería. Es solo un indicador de pantalla grande, donde 1× se
+     ve mal de verdad. No hay forma de preguntar por el estado de la batería
+     que sea fiable y esté disponible, así que esto es lo que hay. */
+  const pantallaGrande = window.matchMedia('(pointer: fine)').matches;
+  dpr = pantallaGrande ? Math.min(window.devicePixelRatio || 1, 2) : 1;
+
+  lienzo.style.width  = `${anchoCSS}px`;
+  lienzo.style.height = `${altoCSS}px`;
+  lienzo.width  = Math.round(anchoCSS * dpr);
+  lienzo.height = Math.round(altoCSS  * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  reservarRejilla();
+  sucio = true;
+}
+
+/* ═══ Esqueleto ══════════════════════════════════════════════════════════
+   Cada hueso es una cápsula de radio VARIABLE: grueso en el hombro, fino en
+   la muñeca. El original usaba un radio único de 0.035 para todo, así que un
+   antebrazo salía tan ancho como un muslo y una persona alejada de la cámara
+   se convertía en una mancha.
+
+   Los radios van en fracción del tramo de torso, no en unidades absolutas:
+   así la silueta conserva sus proporciones cuando el usuario se acerca o se
+   aleja, sin depender de la distancia a la cámara.
+
+   [a, b, radioEnA, radioEnB]                                              */
+const HUESOS = new Float32Array([
+  11,12, 0.135,0.135,   23,24, 0.115,0.115,          // hombros, caderas
+  11,23, 0.135,0.115,   12,24, 0.135,0.115,          // costados
+  11,24, 0.112,0.112,   12,23, 0.112,0.112,          // diagonales: rellenan el torso
+  11,13, 0.078,0.062,   13,15, 0.062,0.046,          // brazo izquierdo
+  12,14, 0.078,0.062,   14,16, 0.062,0.046,          // brazo derecho
+  15,19, 0.050,0.032,   15,17, 0.046,0.030,          // mano izquierda
+  16,20, 0.050,0.032,   16,18, 0.046,0.030,          // mano derecha
+  23,25, 0.105,0.078,   25,27, 0.078,0.052,          // pierna izquierda
+  24,26, 0.105,0.078,   26,28, 0.078,0.052,          // pierna derecha
+  27,31, 0.048,0.033,   29,31, 0.042,0.033,          // pie izquierdo
+  28,32, 0.048,0.033,   30,32, 0.042,0.033,          // pie derecho
+]);
+
+const N_PUNTOS = 33;
+let hayCopia = false;   // ¿hay una pose que dibujar? (ver copiarPose, más abajo)
+
+/* ═══ Presencia ══════════════════════════════════════════════════════════
+   `visibility` no es un campo de fiar en todas las versiones del runtime:
+   hay motores que lo devuelven vacío o siempre a cero. Como toda la lógica
+   de recorte del esqueleto depende de él, la página decide en los primeros
+   fotogramas si puede usarlo y, si no, deduce la presencia de la geometría.
+   Se anuncia en el diagnóstico: si la página está adivinando, se ve.       */
+let modoPresencia = 'probando';
+let framesProbados = 0;
+
+function presenciaGeometrica(lm) {
+  /* MediaPipe extrapola los puntos que se salen del cuadro. Cuanto más
+     lejos del borde, menos crédito merecen. */
+  const fx = lm.x < 0 ? -lm.x : lm.x > 1 ? lm.x - 1 : 0;
+  const fy = lm.y < 0 ? -lm.y : lm.y > 1 ? lm.y - 1 : 0;
+  const fuera = fx > fy ? fx : fy;
+  return fuera <= 0 ? 1 : Math.max(0, 1 - fuera / 0.18);
+}
+
+function decidirModoPresencia(lms) {
+  if (modoPresencia !== 'probando') return;
+  for (const lm of lms) {
+    if (typeof lm.visibility === 'number' && lm.visibility > 0.01) {
+      modoPresencia = 'visibility';
+      return;
+    }
+  }
+  if (++framesProbados >= 15) modoPresencia = 'geometrico';
+}
+
+/* ═══ Rasterizador ═══════════════════════════════════════════════════════
+   Este es el cambio grande. El original preguntaba, por CADA celda de la
+   rejilla, su distancia a los 33 puntos y a las 31 conexiones: a densidad
+   alta son 9 605 celdas × 64 pruebas × 30 fps ≈ 18,4 millones de raíces
+   cuadradas por segundo, la mayoría para celdas de fondo vacío.
+
+   Aquí se invierte el bucle: cada hueso escribe solo en las celdas de su
+   propia caja envolvente. El coste del RASTERIZADO pasa a depender del tamaño
+   de la silueta, no del de la pantalla. (El fotograma no sale gratis del
+   todo: el borrado sigue siendo un `fillRect` de todo el lienzo, y ese sí
+   escala con la pantalla. Es barato, pero no es cero.)
+
+   El borrado también desaparece: `marcaFrame` etiqueta cada celda con el
+   número de fotograma, así que una celda de un fotograma anterior se
+   reconoce como vacía sin recorrer el búfer para ponerlo a cero.          */
+function pintarHueso(ax, ay, bx, by, ra, rb, peso) {
+  const rMax = ra > rb ? ra : rb;
+  let x0 = Math.floor((ax < bx ? ax : bx) - rMax);
+  let x1 = Math.ceil ((ax > bx ? ax : bx) + rMax);
+  let y0 = Math.floor((ay < by ? ay : by) - rMax);
+  let y1 = Math.ceil ((ay > by ? ay : by) + rMax);
+  if (x1 <= 0 || y1 <= 0 || x0 >= cols || y0 >= filas) return;
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 > cols)  x1 = cols;
+  if (y1 > filas) y1 = filas;
+
+  const dx = bx - ax, dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  const invLen2 = len2 > 1e-9 ? 1 / len2 : 0;
+
+  for (let gy = y0; gy < y1; gy++) {
+    const cy = gy + 0.5;
+    const base = gy * cols;
+    for (let gx = x0; gx < x1; gx++) {
+      const cx = gx + 0.5;
+      let t = invLen2 ? ((cx - ax) * dx + (cy - ay) * dy) * invLen2 : 0;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const ex = ax + t * dx - cx;
+      const ey = ay + t * dy - cy;
+      const d2 = ex * ex + ey * ey;
+      const r = ra + (rb - ra) * t;
+      if (d2 >= r * r) continue;
+
+      /* Perfil de plato, no de campana. Con una caída lineal desde el eje,
+         dos cápsulas solapadas y combinadas con max() dejan un valle visible
+         justo entre sus dos ejes: el torso salía dibujado como una X en vez
+         de como un tronco, y las piernas como dos rayas. Con la meseta el
+         interior queda sólido y solo el borde se difumina — así la densidad
+         del glifo la manda la PROFUNDIDAD, que es la señal que interesa, y
+         no la distancia al hueso más cercano, que no dice nada. */
+      const inf = (1 - Math.sqrt(d2) / r) / BORDE_CAPSULA;
+      const w = peso * (inf > 1 ? 1 : inf);
+      const i = base + gx;
+      if (marcaFrame[i] !== idFrame) {
+        marcaFrame[i] = idFrame;
+        pesos[i] = w;
+        tocadas[nTocadas++] = i;
+      } else if (w > pesos[i]) {
+        pesos[i] = w;
+      }
+    }
+  }
+}
+
+/* ═══ Proyección y dibujo ════════════════════════════════════════════════ */
+const px = new Float32Array(N_PUNTOS);
+const py = new Float32Array(N_PUNTOS);
+const pz = new Float32Array(N_PUNTOS);
+const pv = new Float32Array(N_PUNTOS);
+
+let zBajo = -0.4, zAlto = 0.4;   // rango de profundidad observado, suavizado
+let coloresNivel = [];
+/* El halo es lo primero que suelta el gobernador, así que su estado real no
+   es la preferencia del usuario sino la preferencia MENOS la degradación. */
+let haloActivo = false;
+
+function recalcularColores() {
+  coloresNivel = [];
+  for (let n = 0; n < NIVELES; n++) {
+    const t = n / (NIVELES - 1);
+    /* El original calculaba `hsl(120,100%, brillo*0.6)` con brillo de 180 a
+       255 — siempre >100 tras el clamp, y luminosidad 100 % en HSL es blanco
+       puro sea cual sea el tono. El modo «verde» pintaba de blanco todo
+       salvo las celdas con halo, que saltaban a #0f0 de golpe. Aquí el
+       recorrido se queda dentro del rango donde el tono se ve. */
+    if (config.tinta === 'verde')      coloresNivel.push(`hsl(140 90% ${Math.round(24 + t * 36)}%)`);
+    else if (config.tinta === 'ambar') coloresNivel.push(`hsl(44 95% ${Math.round(28 + t * 34)}%)`);
+    else                               coloresNivel.push(`hsl(0 0% ${Math.round(40 + t * 54)}%)`);
+  }
+}
+
+function dibujar(lms, atenuacion) {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, anchoCSS, altoCSS);
+  if (!lms || atenuacion <= 0) return 0;
+
+  const vw = video.videoWidth  || 4;
+  const vh = video.videoHeight || 3;
+
+  /* Encaje «cover»: el cuadro de la cámara llena el lienzo conservando su
+     relación de aspecto. Medir las distancias en píxeles y no en coordenadas
+     normalizadas es lo que mantiene los radios circulares; si se midieran en
+     [0,1] sobre un lienzo no cuadrado, cada cápsula saldría elíptica. */
+  const escala = Math.max(anchoCSS / vw, altoCSS / vh);
+  const dw = vw * escala, dh = vh * escala;
+  const ox = (anchoCSS - dw) / 2, oy = (altoCSS - dh) / 2;
+
+  let zMin = Infinity, zMax = -Infinity;
+  for (let i = 0; i < N_PUNTOS; i++) {
+    const lm = lms[i];
+    if (!lm) { pv[i] = 0; continue; }
+    const nx = config.espejo ? 1 - lm.x : lm.x;
+    px[i] = (ox + nx * dw) / celda;
+    py[i] = (oy + lm.y * dh) / celda;
+    pz[i] = lm.z || 0;
+    pv[i] = modoPresencia === 'visibility'
+      ? (typeof lm.visibility === 'number' ? lm.visibility : 1)
+      : presenciaGeometrica(lm);
+    if (pv[i] >= UMBRAL_PRESENCIA) {
+      if (pz[i] < zMin) zMin = pz[i];
+      if (pz[i] > zMax) zMax = pz[i];
+    }
+  }
+  if (zMin === Infinity) return 0;
+
+  /* Rango de profundidad suavizado: sin el promedio, un brazo que entra o
+     sale del cuadro reescala toda la silueta de un fotograma al siguiente. */
+  zBajo += (zMin - zBajo) * 0.15;
+  zAlto += (zMax - zAlto) * 0.15;
+  const zSpan = zAlto - zBajo;
+  const hayProfundidad = zSpan > 0.08;
+
+  /* Tramo de torso: la unidad de medida de todo el esqueleto. */
+  const hx = (px[11] + px[12]) * 0.5, hy = (py[11] + py[12]) * 0.5;
+  const cx = (px[23] + px[24]) * 0.5, cy = (py[23] + py[24]) * 0.5;
+  const caderasVisibles = pv[23] >= UMBRAL_PRESENCIA && pv[24] >= UMBRAL_PRESENCIA;
+  let tramo = caderasVisibles
+    ? Math.hypot(cx - hx, cy - hy)
+    : Math.hypot(px[11] - px[12], py[11] - py[12]) * 1.55;
+  if (!(tramo > 0)) return 0;
+  tramo = Math.max(tramo, 3);   // por debajo de 3 celdas no queda silueta que ver
+
+  /* profundidad(z) → 1 en lo más cercano a la cámara (z más negativo). Esto
+     sustituye a la tabla fija de `bodyParts.depth` del original, que asignaba
+     a cada parte una profundidad constante: la cara siempre delante, las
+     piernas siempre detrás, aunque el usuario estirase un brazo hacia la
+     lente. Aquí la mano adelantada se densifica de verdad. */
+  const prof = (z) => hayProfundidad ? 0.62 + 0.38 * ((zAlto - z) / zSpan) : 1;
+
+  idFrame++;
+  if (idFrame === 0xFFFFFFFF) { marcaFrame.fill(0); idFrame = 1; }
+  nTocadas = 0;
+
+  for (let k = 0; k < HUESOS.length; k += 4) {
+    const a = HUESOS[k] | 0, b = HUESOS[k + 1] | 0;
+    const va = pv[a], vb = pv[b];
+    if (va < UMBRAL_PRESENCIA || vb < UMBRAL_PRESENCIA) continue;
+    const peso = Math.min(va, vb) * prof((pz[a] + pz[b]) * 0.5) * atenuacion;
+    pintarHueso(px[a], py[a], px[b], py[b],
+                HUESOS[k + 2] * tramo, HUESOS[k + 3] * tramo, peso);
+  }
+
+  /* Columna central. Ni los costados ni las diagonales llegan al centro del
+     tronco: entre unos y otras queda una franja hueca de un par de celdas
+     justo por donde va el esternón. No es un parche estético — es que el
+     torso de una persona es macizo y el listado de huesos, que solo une
+     puntos del modelo, no tiene ningún hueso que lo atraviese. */
+  if (caderasVisibles && pv[11] >= UMBRAL_PRESENCIA && pv[12] >= UMBRAL_PRESENCIA) {
+    pintarHueso(hx, hy, cx, cy, tramo * 0.17, tramo * 0.16,
+      Math.min(pv[11], pv[12], pv[23], pv[24]) *
+      prof((pz[11] + pz[12] + pz[23] + pz[24]) * 0.25) * atenuacion);
+  }
+
+  /* Cabeza y cuello van aparte: su radio sale de la separación entre orejas,
+     que es una medida real de la persona, no de una fracción del torso. */
+  const orejas = pv[7] >= UMBRAL_PRESENCIA && pv[8] >= UMBRAL_PRESENCIA;
+  if (orejas || pv[0] >= UMBRAL_PRESENCIA) {
+    const kx = orejas ? (px[7] + px[8]) * 0.5 : px[0];
+    const ky = orejas ? (py[7] + py[8]) * 0.5 : py[0];
+    const kz = orejas ? (pz[7] + pz[8]) * 0.5 : pz[0];
+    const rk = orejas ? Math.max(Math.hypot(px[7] - px[8], py[7] - py[8]) * 0.74, tramo * 0.16)
+                      : tramo * 0.23;
+    const vk = orejas ? Math.min(pv[7], pv[8]) : pv[0];
+    pintarHueso(kx, ky, kx, ky, rk, rk, vk * prof(kz) * atenuacion);
+    if (pv[11] >= UMBRAL_PRESENCIA && pv[12] >= UMBRAL_PRESENCIA) {
+      pintarHueso(kx, ky, hx, hy, rk * 0.5, tramo * 0.115,
+                  Math.min(vk, pv[11], pv[12]) * prof(kz) * atenuacion);
+    }
+  }
+
+  /* Reparto por niveles de brillo: una sola pasada sobre las celdas tocadas,
+     no sobre la rejilla entera. */
+  cuboN.fill(0);
+  for (let t = 0; t < nTocadas; t++) {
+    const i = tocadas[t];
+    let w = pesos[i] + ruido[i];
+    if (w < UMBRAL_PINTAR) continue;
+    if (w > 1) w = 1;
+    pesos[i] = w;
+    let n = (w * NIVELES) | 0;
+    if (n >= NIVELES) n = NIVELES - 1;
+    cubos[n][cuboN[n]++] = i;
+  }
+
+  const tam = celda * 0.92;
+
+  /* Halo. `shadowBlur` del original desenfocaba CADA glifo por separado: con
+     mil glifos calientes son mil desenfoques gaussianos por fotograma, y es
+     con diferencia lo más caro que hacía la página. Aquí es un segundo
+     `fillText` más grande y traslúcido sobre los mismos glifos: el coste
+     crece con la silueta, no con el área del lienzo, y no hace falta ni un
+     búfer intermedio del tamaño del cuadro.
+
+     El argumento es ESTRUCTURAL, no medido: `shadowBlur` desenfoca por
+     operación de dibujo por definición de la especificación, así que su coste
+     crece con el número de glifos. Aquí no hay ningún perfil que diga cuánto
+     era eso en milisegundos, ni sobre `ctx.filter`, que se descarta por
+     necesitar ese búfer y no por ninguna medición propia. Apagado por
+     defecto, y el gobernador lo tira antes que ninguna otra cosa. */
+  let pintadas = 0;
+  if (haloActivo) {
+    ctx.font = `${tam * 1.34}px ${FAMILIA}`;
+    ctx.globalAlpha = 0.20;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = coloresNivel[NIVELES - 1];
+    for (let n = NIVEL_CALIENTE; n < NIVELES; n++) {
+      const cubo = cubos[n];
+      for (let j = 0; j < cuboN[n]; j++) {
+        const i = cubo[j];
+        const ch = rampaActiva[lutGlifos[(pesos[i] * (LUT_N - 1)) | 0]][0];
+        if (ch === ' ') continue;
+        ctx.fillText(ch, ((i % cols) + 0.5) * celda, (((i / cols) | 0) + 0.5) * celda);
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  ctx.font = `${tam}px ${FAMILIA}`;
+  for (let n = 0; n < NIVELES; n++) {
+    if (!cuboN[n]) continue;
+    ctx.fillStyle = coloresNivel[n];
+    const cubo = cubos[n];
+    for (let j = 0; j < cuboN[n]; j++) {
+      const i = cubo[j];
+      const ch = rampaActiva[lutGlifos[(pesos[i] * (LUT_N - 1)) | 0]][0];
+      if (ch === ' ') continue;
+      ctx.fillText(ch, ((i % cols) + 0.5) * celda, (((i / cols) | 0) + 0.5) * celda);
+      pintadas++;
+    }
+  }
+  return pintadas;
+}
+
+/* ═══ Motor de pose ══════════════════════════════════════════════════════ */
+const video = document.createElement('video');
+video.playsInline = true;
+/* Se asignan como propiedades porque el elemento se crea con `createElement`
+   y nunca entra en el documento: no hay marcado donde poner atributos. Y
+   `play()` se llama explícitamente en `abrirCamara()`, así que la política de
+   autoarranque no llega a intervenir. Un comentario anterior presentaba esto
+   como la distinción propiedad-contra-atributo de iOS; aquí no aplica. */
+video.muted = true;
+video.autoplay = true;
+
+let detector = null;
+let flujo = null;
+let delegado = '—';
+let corriendo = false;
+let suspendido = false;
+
+const poseVigente = Array.from({ length: N_PUNTOS }, () => ({ x: 0, y: 0, z: 0, visibility: 0 }));
+let hayPose = false;
+let atenuacion = 0;
+let sucio = false;
+
+async function cargarMotor() {
+  if (detector) return;
+  anunciar('Descargando motor y modelo (~8.9 MB la primera vez)…');
+
+  let PoseLandmarker, FilesetResolver;
+  try {
+    ({ PoseLandmarker, FilesetResolver } = await import(/* @vite-ignore */ URL_MODULO));
+  } catch (e) {
+    /* Un import estático que falla deja la página en blanco sin decir nada.
+       Dinámico y envuelto, al menos el usuario sabe qué pasó. */
+    throw new Error(`No se pudo cargar el motor de visión desde el CDN (${e.message}). ¿Hay red?`);
+  }
+
+  const fileset = await FilesetResolver.forVisionTasks(URL_WASM);
+  const crear = (delegate) => PoseLandmarker.createFromOptions(fileset, {
+    baseOptions: { modelAssetPath: URL_MODELO, delegate },
+    runningMode: 'VIDEO',
+    numPoses: 1,
+    minPoseDetectionConfidence: 0.5,
+    minPosePresenceConfidence: 0.5,
+    minTrackingConfidence: 0.5,
+    /* Sin máscara de segmentación: cuesta una pasada extra de la red y un
+       búfer del tamaño del cuadro, y aquí no se usa ni un píxel de ella. */
+    outputSegmentationMasks: false,
+  });
+
+  /* Delegado. Aquí NO hay una elección obvia, y es más útil decirlo que
+     inventarle una justificación energética. Lo que se sabe, con su fuente y
+     con su alcance real, que es más estrecho de lo que parece:
+
+       · Google no publica ninguna cifra de latencia ni de consumo para
+         PoseLandmarker, ni recomienda variante según el hardware. La página
+         del task no tiene columna de latencia.
+       · mediapipe#6041 (cerrada, «GPU for pose detection enabled but no
+         performance increase») mide PoseLandmarker con GPU y con CPU y saca
+         27.14 fps en los dos casos. Pero es Python sobre macOS con el
+         delegado Metal: NO es la web, NO es WebGL y NO es un móvil. Sirve
+         para decir que la GPU no es gratis y evidente, no para predecir nada
+         de un teléfono.
+       · El delegado GPU levanta su propio contexto WebGL. Esto sí es firme:
+         está en la definición de tipos de la propia librería, en
+         `VisionTaskOptions.canvas` — «has to be set for GPU processing. The
+         task will initialize a WebGL context». Si esta página acabara dentro
+         de la app, ese contexto competiría con el de la Esfera Viva.
+
+     Lo que este comentario NO puede alegar, aunque una versión anterior lo
+     hiciera: mediapipe#5377 (abierta) reporta `glReadPixels` dentro del
+     módulo WASM y sospecha de puntos de sincronización GPU↔CPU, pero lo
+     reporta para el backend de CPU. O sea, dice que la librería toca WebGL
+     de todas formas — no es un cargo contra el delegado GPU. Citarla como
+     tal era atribuirle lo contrario de lo que dice.
+
+     Conclusión: el defecto es CPU porque es el defecto de la librería y
+     porque nada respalda cambiarlo, no porque haya evidencia de que la GPU
+     sea peor. La GPU queda a un parámetro de distancia (`?delegate=GPU`)
+     para medir las dos en un teléfono real. Esa medición es el trabajo; esto
+     solo es el valor por defecto mientras tanto. */
+  const pedido = new URLSearchParams(location.search).get('delegate');
+  const preferido = pedido?.toUpperCase() === 'GPU' ? 'GPU' : 'CPU';
+  try {
+    detector = await crear(preferido);
+    delegado = preferido;
+  } catch (e) {
+    if (preferido === 'CPU') throw e;
+    detector = await crear('CPU');
+    delegado = 'CPU (la GPU falló)';
+  }
+}
+
+async function abrirCamara() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error('La cámara solo está disponible en contexto seguro: usa https:// o localhost.');
+  }
+  flujo = await navigator.mediaDevices.getUserMedia({
+    audio: false,   // explícito: esta página no tiene nada que hacer con el micrófono
+    video: {
+      facingMode: 'user',
+      width:  { ideal: 640 },
+      height: { ideal: 480 },
+      /* Techo de 30 fps. Sin él, un teléfono que puede entregar 60 los
+         entrega y se paga el doble de DECODIFICACIONES de vídeo, cada una con
+         su recorrido por el procesador de imagen. Las inferencias no se
+         duplican —las limita `intervaloInferencia`, no la cámara—, así que el
+         ahorro es real pero menor de lo que decía una versión anterior. */
+      frameRate: { ideal: 30, max: 30 },
+    },
+  });
+  video.srcObject = flujo;
+  await video.play();
+}
+
+function cerrarCamara() {
+  flujo?.getTracks().forEach((t) => t.stop());
+  flujo = null;
+  video.srcObject = null;
+}
+
+function mensajeDeError(e) {
+  switch (e?.name) {
+    case 'NotAllowedError':      return 'Permiso de cámara denegado. Habilítalo en los ajustes del sitio y vuelve a intentarlo.';
+    case 'NotFoundError':
+    case 'OverconstrainedError': return 'No se encontró ninguna cámara frontal utilizable en este aparato.';
+    case 'NotReadableError':     return 'La cámara está ocupada por otra aplicación. Ciérrala y reintenta.';
+    case 'SecurityError':        return 'El navegador bloqueó la cámara por política de seguridad de la página.';
+    default:                     return e?.message || 'Fallo desconocido al arrancar la cámara.';
+  }
+}
+
+/* ═══ Copia de la pose ═══════════════════════════════════════════════════
+   Aquí NO se suaviza, y es deliberado.
+
+   La API web no expone `smoothLandmarks` porque el runtime ya aplica un
+   filtro Un Euro dentro del grafo — pero SOLO si se cumplen las dos
+   condiciones que están puestas arriba en `createFromOptions`:
+   `numPoses: 1` y `runningMode: 'VIDEO'`. Con más de una pose el suavizado
+   se desactiva entero y sin avisar; con `'IMAGE'` tampoco se aplica y encima
+   se paga una detección completa por fotograma en lugar del seguimiento.
+   Los dos ajustes parecen cosméticos y no lo son: sostienen esto.
+
+   De dónde sale, porque es la afirmación de la que más depende este archivo:
+   de `pose_landmarker_graph.cc` en el repositorio de MediaPipe, donde
+   `set_smooth_landmarks(...)` se aplica bajo `if (num_poses() == 1)` y con
+   `use_stream_mode` derivado del runningMode; el filtro concreto lleva
+   min_cutoff 0.05, beta 80 y derivate_cutoff 1.0.
+
+   Es un detalle de IMPLEMENTACIÓN, no API documentada, así que puede cambiar
+   sin aviso en una versión futura. Síntoma observable si eso pasa: la silueta
+   empieza a temblar en reposo. El arreglo sería volver a poner un Un Euro
+   aquí — no darlo por perdido.
+
+   Encadenar un segundo Un Euro encima solo añadiría retardo sin quitar
+   temblor. Lo que sí hace falta es copiar: la pose se conserva para poder
+   seguir dibujando el desvanecido cuando el detector ya no devuelve nada. */
+function copiarPose(bruto) {
+  for (let i = 0; i < N_PUNTOS; i++) {
+    const b = bruto[i], s = poseVigente[i];
+    s.x = b.x; s.y = b.y; s.z = b.z || 0; s.visibility = b.visibility;
+  }
+  hayCopia = true;
+}
+
+/* ═══ Gobernador térmico ═════════════════════════════════════════════════
+   La página mide lo que cuesta y se recorta sola. Sin esto, un teléfono de
+   gama media entra en throttling a los pocos minutos y la culpa parece del
+   modelo cuando en realidad es del pintado.
+
+   Escalones, del más barato de perder al más caro:
+     0 · todo   1 · sin halo   2 · celda +4   3 · inferencia a 20 Hz        */
+/* La escalera, explícita en una tabla en vez de repartida en condiciones
+   sueltas del tipo `escalon >= 2`. Va de lo más barato de perder a lo más
+   caro, y los dos últimos peldaños bajan la FRECUENCIA de inferencia lo
+   suficiente como para que la ocupación pueda bajar de verdad en un teléfono
+   donde una sola llamada al detector ya se come el presupuesto. Sin ellos, el
+   gobernador solo sabía bajar: llegaba al último escalón en unos segundos y
+   se quedaba clavado, con el halo apagado para siempre y sin decir por qué. */
+const ESCALONES = [
+  { halo: true,  celdaExtra: 0, hz: 30 },
+  { halo: false, celdaExtra: 0, hz: 30 },
+  { halo: false, celdaExtra: 4, hz: 30 },
+  { halo: false, celdaExtra: 4, hz: 20 },
+  { halo: false, celdaExtra: 8, hz: 12 },
+  { halo: false, celdaExtra: 8, hz: 8  },
+];
+let escalon = 0, sobre = 0, bajo = 0, ultimoCambio = 0;
+let msInferencia = 0, msDibujo = 0;
+let ocupacion = 0;
+let celdaBase = DENSIDADES[config.densidad].celda;
+let intervaloBase = 1000 / 30;
+let intervaloInferencia = intervaloBase;
+
+function aplicarEscalon() {
+  const e = ESCALONES[escalon];
+  intervaloBase = 1000 / e.hz;
+  haloActivo = config.halo && e.halo;
+  const nuevaCelda = celdaBase + e.celdaExtra;
+  if (nuevaCelda !== celda) { celda = nuevaCelda; reservarRejilla(); }
+  refrescarHalo();
+  sucio = true;
+}
+
+/* Se llama UNA VEZ POR MEDICIÓN, no una vez por callback. Antes se llamaba en
+   cada callback: al ralentí, con la cámara a 30 Hz y la inferencia a 5, la
+   misma media móvil se contaba seis veces, así que las «12 mediciones
+   seguidas» eran en realidad dos. */
+function gobernar(ahora) {
+  ocupacion = (msInferencia + msDibujo) / intervaloInferencia;
+  if (ocupacion > OCUPACION_ALTA) { sobre++; bajo = 0; }
+  else if (ocupacion < OCUPACION_BAJA) { bajo++; sobre = 0; }
+  else { sobre = 0; bajo = 0; }
+
+  if (ahora - ultimoCambio < 1000) return;   // un escalón por segundo como mucho
+
+  if (sobre >= MUESTRAS_BAJAR && escalon < ESCALONES.length - 1) {
+    escalon++; sobre = 0; ultimoCambio = ahora; aplicarEscalon();
+  } else if (bajo >= MUESTRAS_SUBIR && escalon > 0) {
+    escalon--; bajo = 0; ultimoCambio = ahora; aplicarEscalon();
+  }
+}
+
+/* ═══ Bucle ══════════════════════════════════════════════════════════════
+   Nada de rAF infinito repintando lo mismo. Se infiere solo cuando el vídeo
+   ha entregado un fotograma NUEVO —de ahí la comparación de `currentTime`,
+   que evita volver a pasar por la red el mismo cuadro cuando la pantalla va
+   a 120 Hz y la cámara a 30— y se dibuja solo cuando hay algo distinto que
+   dibujar.
+
+   Con matiz, para no prometer de más: lo que duerme es la GPU y el
+   rasterizado, porque `sucio` corta el pintado. El hilo principal NO se
+   detiene — `programar()` vuelve a agendar siempre que la cámara esté en
+   marcha. En el camino con rVFC eso son 30 despertares por segundo, el ritmo
+   de la cámara, y casi todos se limitan a comparar `currentTime` y volver a
+   agendar. En el camino de respaldo con rAF son los de la pantalla, que
+   pueden ser 120. rVFC está en Chrome 83+, Safari 15.4+ y Firefox 132+, así
+   que el respaldo no llega al WebView de Capacitor; queda para navegadores
+   viejos de escritorio. */
+const usaRVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
+let asaRVFC = 0, asaRAF = 0;
+let ultimoTiempoVideo = -1, ultimaInferencia = 0, ultimaPose = 0, ultimoPaso = 0;
+
+function programar() {
+  if (!corriendo) return;
+  /* Cancelar antes de programar. Sin esto, un ciclo ocultar/mostrar durante
+     la reapertura de la cámara deja DOS cadenas de `paso()` vivas, y
+     `detenerBucle()` solo guarda un asa: solo puede matar una. El gasto se
+     duplica sin que la línea de diagnóstico lo delate. */
+  detenerBucle();
+  if (usaRVFC) asaRVFC = video.requestVideoFrameCallback(() => paso(performance.now()));
+  else         asaRAF  = requestAnimationFrame(paso);
+}
+
+function detenerBucle() {
+  if (asaRVFC && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(asaRVFC);
+  if (asaRAF) cancelAnimationFrame(asaRAF);
+  asaRVFC = asaRAF = 0;
+}
+
+function paso(ahora) {
+  const dt = Math.min(Math.max((ahora - ultimoPaso) / 1000, 1 / 240), 0.25);
+  ultimoPaso = ahora;
+
+  const cuadroNuevo = video.readyState >= 2 && video.currentTime !== ultimoTiempoVideo;
+  if (cuadroNuevo && ahora - ultimaInferencia >= intervaloInferencia) {
+    ultimoTiempoVideo = video.currentTime;
+    ultimaInferencia = ahora;
+
+    const t0 = performance.now();
+    let res = null;
+    try {
+      res = detector.detectForVideo(video, ahora);
+    } catch (e) {
+      /* El mensaje va DENTRO de detener(), que termina anunciando. Antes se
+         anunciaba aquí y detener() lo pisaba un milisegundo después con
+         «Detenido»: el usuario veía una parada normal. Y el console.error no
+         es red de seguridad — esta página está en rollupOptions.input y el
+         build lleva `drop_console: true`, así que en el teléfono no queda
+         ni un rastro. La pantalla es la única señal que sobrevive. */
+      console.error('[halftone] detectForVideo', e);
+      detener(`El detector falló: ${e.message}`, 'error');
+      return;
+    }
+    msInferencia += (performance.now() - t0 - msInferencia) * 0.1;
+
+    const bruto = res?.landmarks?.[0];
+    if (bruto && bruto.length >= N_PUNTOS) {
+      decidirModoPresencia(bruto);
+      copiarPose(bruto);
+      hayPose = true;
+      atenuacion = 1;
+      ultimaPose = ahora;
+    } else {
+      hayPose = false;
+    }
+    sucio = true;
+    gobernar(ahora);
+  }
+
+  /* Al perder la pose la silueta se apaga en vez de desaparecer de golpe: un
+     corte seco se lee como un fallo, un desvanecido se lee como una salida. */
+  if (!hayPose && atenuacion > 0) {
+    atenuacion = Math.max(0, atenuacion - (dt * 1000) / DESVANECIDO_MS);
+    sucio = true;
+  }
+
+  /* Al ralentí cuando no hay nadie delante. Recorta el CÓMPUTO en un factor
+     de seis, que es lo que se puede afirmar. Lo que no hace es apagar el
+     sensor: la cámara sigue capturando a 30 fps y su procesador de imagen
+     sigue encendido — y según el comentario de `visibilitychange`, ese es el
+     consumo dominante. Los dos comentarios se contradecían; este es el que se
+     ajusta a lo que hace el código. */
+  intervaloInferencia = (ahora - ultimaPose > IDLE_MS) ? INTERVALO_IDLE : intervaloBase;
+
+  if (sucio) {
+    const t1 = performance.now();
+    const pintadas = dibujar(hayCopia ? poseVigente : null, atenuacion);
+    msDibujo += (performance.now() - t1 - msDibujo) * 0.1;
+    sucio = atenuacion > 0 && !hayPose;   // seguir mientras dure el desvanecido
+    refrescarDiagnostico(pintadas);
+  }
+
+  programar();
+}
+
+/* ═══ Arranque y parada ══════════════════════════════════════════════════ */
+const $arranque  = document.getElementById('btn-arranque');
+const $densidad  = document.getElementById('btn-densidad');
+const $estilo    = document.getElementById('btn-estilo');
+const $tinta     = document.getElementById('btn-tinta');
+const $espejo    = document.getElementById('btn-espejo');
+const $halo      = document.getElementById('btn-halo');
+const $estado    = document.getElementById('estado');
+const $diag      = document.getElementById('diagnostico');
+
+function anunciar(texto, clase = '') {
+  $estado.textContent = texto;
+  $estado.className = clase;
+}
+
+let arrancando = false;
+
+async function arrancar() {
+  /* Cerrojo de reentrada. En el original, pulsar «Iniciar» disparaba el
+     manejador del botón Y el de `document.body`, y como `startCamera` es
+     asíncrona la bandera `isRunning` seguía en falso cuando entraba la
+     segunda llamada: se creaban DOS cámaras, la primera quedaba inalcanzable
+     y ya no había forma de pararla. Dos flujos de vídeo y dos bucles de
+     inferencia consumiendo a la vez, sin nada en pantalla que lo delatara. */
+  if (corriendo || arrancando) return;
+  arrancando = true;
+  $arranque.disabled = true;
+  $arranque.textContent = 'Cargando…';
+
+  try {
+    await cargarMotor();
+    anunciar('Pidiendo permiso de cámara…');
+    await abrirCamara();
+
+    corriendo = true;
+    suspendido = false;
+    ultimoPaso = ultimaInferencia = ultimaPose = performance.now();
+    ultimoTiempoVideo = -1;
+    $arranque.textContent = 'Detener cámara';
+    $arranque.dataset.activo = '1';
+    anunciar(`En marcha · el vídeo se procesa aquí y no sale del aparato.`);
+    programar();
+  } catch (e) {
+    console.error('[halftone] arranque', e);
+    anunciar(mensajeDeError(e), 'error');
+    cerrarCamara();
+    corriendo = false;
+  } finally {
+    arrancando = false;
+    $arranque.disabled = false;
+    if (!corriendo) $arranque.textContent = 'Iniciar cámara';
+  }
+}
+
+function detener(mensaje = 'Detenido. La cámara está liberada.', clase = '') {
+  corriendo = false;
+  detenerBucle();
+  cerrarCamara();
+  clearTimeout(temporizadorSuspension);
+  suspendido = false;
+  hayPose = false;
+  atenuacion = 0;
+  hayCopia = false;
+
+  /* Reinicio del estado de medición. Este banco existe para MEDIR, así que
+     no puede arrastrar una toma a la siguiente: sin esto, una sesión que
+     acabó degradada arranca la próxima ya en el escalón máximo, con las
+     medias móviles y el rango de profundidad de otra persona en otra luz. */
+  escalon = 0; sobre = 0; bajo = 0; ultimoCambio = 0;
+  msInferencia = 0; msDibujo = 0;
+  zBajo = -0.4; zAlto = 0.4;
+  modoPresencia = 'probando'; framesProbados = 0;
+  aplicarEscalon();
+
+  $arranque.textContent = 'Iniciar cámara';
+  $arranque.dataset.activo = '0';
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, anchoCSS, altoCSS);
+  $diag.textContent = '';
+  anunciar(mensaje, clase);
+}
+
+/* ═══ Pausa en segundo plano ═════════════════════════════════════════════
+   Lo que más gasta cuando la pestaña no se ve no es el dibujado (el
+   navegador ya lo frena) sino el sensor y su procesador de imagen, que
+   siguen encendidos mientras el flujo esté vivo. Se para el bucle al
+   instante y se suelta la cámara si la ausencia se alarga: reabrirla cuesta
+   medio segundo, y no vuelve a pedir permiso porque ya está concedido. */
+let temporizadorSuspension = 0;
+
+/* ¿Se puede soltar la cámara sin arriesgar una segunda petición de permiso?
+   Solo si el permiso es PERSISTENTE. Con «Permitir esta vez» —el valor por
+   defecto de Chrome desde hace años— volver a abrirla vuelve a preguntar, sin
+   que el usuario haya pedido nada, solo por haber cambiado de pestaña diez
+   segundos. Ese susto es peor que el ahorro. Firefox y Safari no admiten el
+   nombre 'camera' en la API de permisos: ahí no se suelta, y el bucle parado
+   ya elimina casi todo el consumo salvo el del propio sensor.
+
+   Corrige un comentario anterior que afirmaba, sin más, que «no vuelve a
+   pedir permiso porque ya está concedido». */
+async function permisoPersistente() {
+  try {
+    const p = await navigator.permissions?.query({ name: 'camera' });
+    return p?.state === 'granted';
+  } catch { return false; }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (!corriendo) return;
+    detenerBucle();
+    clearTimeout(temporizadorSuspension);
+    temporizadorSuspension = setTimeout(async () => {
+      if (!document.hidden || !corriendo) return;
+      if (await permisoPersistente()) { cerrarCamara(); suspendido = true; }
+    }, 10000);
+  } else {
+    clearTimeout(temporizadorSuspension);
+    if (!corriendo) return;
+    (async () => {
+      try {
+        if (suspendido) {
+          await abrirCamara();
+          /* Volver a mirar `corriendo` DESPUÉS del await, y este no es un
+             cinturón de más. Reabrir tarda del orden de medio segundo, y en
+             ese hueco el usuario puede pulsar Detener: `detener()` llamaría a
+             `cerrarCamara()` cuando `flujo` TODAVÍA es null, no pararía nada,
+             y al resolverse esta promesa quedarían pistas de vídeo vivas con
+             la página afirmando en pantalla que la cámara está liberada. El
+             siguiente Iniciar sobrescribiría `flujo` y esas pistas ya no se
+             podrían parar nunca. Es el bug del doble arranque otra vez,
+             entrando por la puerta de atrás. */
+          if (!corriendo) { cerrarCamara(); return; }
+          suspendido = false;
+        }
+        ultimoPaso = ultimaInferencia = performance.now();
+        ultimoTiempoVideo = -1;
+        programar();
+      } catch (e) {
+        anunciar(mensajeDeError(e), 'error');
+        detener();
+      }
+    })();
+  }
+});
+
+window.addEventListener('pagehide', () => {
+  /* `detener()` y no solo cerrar: si el documento se restaura desde la
+     bfcache —volver atrás desde index.html, que enlaza esta página— sin esto
+     el usuario se encuentra el botón en «Detener cámara» y el estado en «En
+     marcha», sin flujo ni bucle. Su primera pulsación no haría lo que dice
+     el botón. */
+  if (corriendo) detener('Detenido al salir de la página.');
+  else cerrarCamara();
+});
+
+/* ═══ Diagnóstico ════════════════════════════════════════════════════════
+   La Fase 1 del proyecto es MEDIR. Una página que no dice lo que cuesta no
+   sirve como banco de pruebas, así que los números están a la vista. */
+let ultimoDiag = 0;
+function refrescarDiagnostico(pintadas) {
+  const ahora = performance.now();
+  if (ahora - ultimoDiag < 250) return;
+  ultimoDiag = ahora;
+  $diag.textContent =
+    `${delegado} · ${celda}px · ${dpr}× · ${ESCALONES[escalon].hz}Hz · ` +
+    `red ${msInferencia.toFixed(1)}ms · pintar ${msDibujo.toFixed(1)}ms · ` +
+    `ocupación ${(ocupacion * 100).toFixed(0)}% · ${pintadas} glifos · ` +
+    `escalón ${escalon}/${ESCALONES.length - 1} · presencia ${modoPresencia} · ` +
+    `glifos ${sondaEstado}`;
+}
+
+/* ═══ Controles ══════════════════════════════════════════════════════════ */
+/* La etiqueta tiene que decir la verdad. Cuando el gobernador apaga el halo,
+   el botón se quedaba en «Halo: sí» con el halo apagado, y pulsarlo no
+   producía ningún cambio visible ni ninguna explicación. */
+function refrescarHalo() {
+  $halo.textContent = !config.halo ? 'Halo: no'
+                    : haloActivo   ? 'Halo: sí'
+                                   : 'Halo: sí (en pausa por carga)';
+  $halo.setAttribute('aria-pressed', String(config.halo));
+}
+
+/* La sonda vuelve a evaluarse en cada cambio de estilo, así que el aviso
+   también tiene que volver a darse: antes se anunciaba una sola vez al cargar
+   y pasar de «mixto» a «cruces» en un Android sin Dingbats caía a ASCII en
+   silencio, con el botón afirmando «Estilo: cruces». Solo habla si hay algo
+   que decir, así que no pisa el mensaje de estado cuando todo está bien. */
+function avisarSonda() {
+  if (sondaEstado === 'respaldo-ascii')
+    anunciar('Esta fuente no trae los símbolos de la rampa elegida; se usa la rampa ASCII.', 'aviso');
+  else if (sondaEstado === 'parcial')
+    anunciar('Faltan algunos glifos en la fuente del sistema; la rampa se ha recortado a los disponibles.', 'aviso');
+  else if (sondaEstado === 'no concluyente')
+    anunciar('Este navegador dibuja distinto cada glifo ausente, así que la sonda no puede verificar la rampa. Si ves cajas vacías, pasa a estilo ASCII.', 'aviso');
+  else if (sondaEstado === 'inservible')
+    anunciar('La sonda de glifos no funciona en este motor; la rampa va sin verificar.', 'aviso');
+}
+
+$arranque.addEventListener('click', () => (corriendo ? detener() : arrancar()));
+
+$densidad.addEventListener('click', () => {
+  config.densidad = (config.densidad + 1) % DENSIDADES.length;
+  celdaBase = DENSIDADES[config.densidad].celda;
+  $densidad.textContent = `Densidad: ${DENSIDADES[config.densidad].nombre}`;
+  aplicarEscalon();
+});
+
+$estilo.addEventListener('click', () => {
+  config.estilo = ESTILOS[(ESTILOS.indexOf(config.estilo) + 1) % ESTILOS.length];
+  $estilo.textContent = `Estilo: ${config.estilo}`;
+  construirLUT();
+  avisarSonda();
+  sucio = true;
+});
+
+$tinta.addEventListener('click', () => {
+  config.tinta = TINTAS[(TINTAS.indexOf(config.tinta) + 1) % TINTAS.length];
+  $tinta.textContent = `Tinta: ${config.tinta}`;
+  recalcularColores();
+  sucio = true;
+});
+
+$espejo.addEventListener('click', () => {
+  config.espejo = !config.espejo;
+  $espejo.textContent = `Espejo: ${config.espejo ? 'sí' : 'no'}`;
+  $espejo.setAttribute('aria-pressed', String(config.espejo));
+  sucio = true;
+});
+
+$halo.addEventListener('click', () => {
+  config.halo = !config.halo;
+  aplicarEscalon();   // recalcula haloActivo y, con él, la etiqueta honesta
+});
+
+/* El original arrancaba la cámara con un clic en CUALQUIER parte del cuerpo
+   de la página. Encender una cámara es un acto que el usuario tiene que
+   pedir a propósito, no algo que se dispare por tocar el fondo. No se
+   restituye. */
+
+/* ═══ Inicio ═════════════════════════════════════════════════════════════ */
+let temporizadorRedim = 0;
+window.addEventListener('resize', () => {
+  clearTimeout(temporizadorRedim);
+  temporizadorRedim = setTimeout(() => {
+    redimensionar();
+    if (corriendo && !document.hidden) sucio = true;
+  }, 150);
+});
+
+construirLUT();
+recalcularColores();
+redimensionar();
+aplicarEscalon();
+avisarSonda();
+</script>
+</body>
+</html>
