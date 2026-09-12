@@ -905,13 +905,22 @@ async function cargarMotor() {
      de todas formas — no es un cargo contra el delegado GPU. Citarla como
      tal era atribuirle lo contrario de lo que dice.
 
-     Conclusión: el defecto es CPU porque es el defecto de la librería y
-     porque nada respalda cambiarlo, no porque haya evidencia de que la GPU
-     sea peor. La GPU queda a un parámetro de distancia (`?delegate=GPU`)
-     para medir las dos en un teléfono real. Esa medición es el trabajo; esto
-     solo es el valor por defecto mientras tanto. */
+     MEDIDO, y cambia la conclusión. En un Samsung SM-A346M (Galaxy A34 5G),
+     Chrome 152 sobre Android, con pose presente el 100 % de la ventana:
+
+         delegado GPU  ->  red mediana 49.0 ms
+         delegado CPU  ->  red mediana 73.9 ms
+
+     La GPU es un 34 % más rápida, así que el defecto pasa a GPU. Mantener CPU
+     sería conservar una decisión cuya única justificación escrita era «nada
+     respalda cambiarlo», y ya hay algo que lo respalda.
+
+     Límites de esa evidencia, porque importan: una corrida de cada uno, no un
+     A-B-A, en sesiones distintas y sin controlar el estado térmico, y en UN
+     aparato. Un 50 % de diferencia queda lejos del ruido, pero no es un
+     estudio y no se generaliza. `?delegate=CPU` sigue ahí para remedirlo. */
   const pedido = new URLSearchParams(location.search).get('delegate');
-  const preferido = pedido?.toUpperCase() === 'GPU' ? 'GPU' : 'CPU';
+  const preferido = pedido?.toUpperCase() === 'CPU' ? 'CPU' : 'GPU';
   try {
     detector = await crear(preferido);
     delegado = preferido;
@@ -1560,7 +1569,7 @@ function cerrarMedicion() {
   const nSalt = muestras.filter((m) => m.salto).length;
   const nInf = n - nSalt;
   const pedido = new URLSearchParams(location.search).get('delegate');
-  const fase = pedido?.toUpperCase() === 'GPU' ? 'pedido GPU' : 'pedido CPU (defecto)';
+  const fase = pedido?.toUpperCase() === 'CPU' ? 'pedido CPU' : 'pedido GPU (defecto)';
 
   $informe.value = [
     'LIENZO VIVO · medicion',
