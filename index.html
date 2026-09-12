@@ -222,24 +222,27 @@ const OCUPACION_ALTA   = 0.65; // por encima, degradar
 const OCUPACION_BAJA   = 0.40; // por debajo, recuperar
 const MUESTRAS_BAJAR   = 12;   // mediciones seguidas antes de degradar
 const MUESTRAS_SUBIR   = 36;   // el triple para recuperar: mejor corto que oscilando
-/* Compuerta de movimiento. Idea de Rodolfo: usar una parte pequeña del cuadro
-   como referencia para decidir si hace falta llamar al detector.
 
-   No abarata la inferencia —PoseLandmarker redimensiona su entrada a 256×256
-   fijos, así que los milisegundos los fija la red y no el tamaño de lo que
-   entra—. Lo que hace es EVITARLA: si nada se movió, la pose de antes sigue
-   valiendo y se ahorra la llamada entera.
+/* Control de ritmo por movimiento de la pose. Sustituye a una compuerta que
+   miraba 1 200 píxeles del vídeo para decidir si valía la pena inferir. La
+   idea era de Rodolfo y era correcta —menos llamadas al detector— pero aquel
+   mecanismo costaba caro: medido en un Galaxy A34, `getImageData` sobre vídeo
+   fuerza una lectura de vuelta GPU→CPU y salía a 23.8 ms por comprobación,
+   119 veces el coste de pintar. Se comía dos tercios del ahorro: 19 % neto.
 
-   Tapa un agujero real del retroceso al ralentí de más abajo, que solo se
-   activa cuando no hay NADIE en cuadro: una persona sentada quieta pagaba el
-   precio completo por redibujar la misma silueta. */
-const SONDA_W          = 40;   // 1 200 píxeles en vez de 300 000
-const SONDA_H          = 30;
-const SONDA_BLOQUE     = 5;    // rejilla de 8×6 bloques
-const SONDA_UMBRAL_MIN = 2.0;  // en unidades de luma; suelo por si el ruido es ínfimo
-const SONDA_K          = 4;    // desviaciones por encima del ruido para declarar movimiento
-const SONDA_ARRANQUE   = 20;   // comprobaciones de rodaje antes de fiarse del modelo
-const REFRESCO_MS      = 1000; // se infiere igual cada tanto, pase lo que pase
+   Este mecanismo persigue lo mismo y cuesta CERO, porque no mira ni un píxel:
+   los 33 puntos de la inferencia anterior ya están en memoria. Si la pose
+   apenas cambió, se alarga el intervalo; si cambia deprisa, se acorta. Es
+   aritmética sobre datos que ya se tienen.
+
+   La velocidad se mide en TORSOS por segundo y no en unidades normalizadas,
+   para que no dependa de lo lejos que esté la persona: alguien al fondo del
+   cuadro mueve pocos píxeles y no por eso está quieto. */
+const RITMO_MIN_MS  = 1000 / 30;  // techo de ritmo cuando hay movimiento
+const RITMO_MAX_MS  = 400;        // suelo cuando la pose está quieta: 2.5 Hz
+const QUIETO_TPS    = 0.08;       // por debajo de esto se considera quieto
+const MOVIDO_TPS    = 0.50;       // por encima, a ritmo máximo
+const PUNTOS_RITMO  = [11, 12, 13, 14, 15, 16, 23, 24, 25, 26];
 
 const IDLE_MS          = 2500; // sin pose durante esto → inferencia al ralentí
 const INTERVALO_IDLE   = 200;  // 5 Hz mientras no haya nadie delante
@@ -546,6 +549,7 @@ const HUESOS = new Float32Array([
 
 const N_PUNTOS = 33;
 let hayCopia = false;   // ¿hay una pose que dibujar? (ver copiarPose, más abajo)
+let velPose = 0;        // velocidad de la pose, en tramos de torso por segundo
 
 /* ═══ Presencia ══════════════════════════════════════════════════════════
    `visibility` no es un campo de fiar en todas las versiones del runtime:
@@ -995,12 +999,53 @@ function mensajeDeError(e) {
    Encadenar un segundo Un Euro encima solo añadiría retardo sin quitar
    temblor. Lo que sí hace falta es copiar: la pose se conserva para poder
    seguir dibujando el desvanecido cuando el detector ya no devuelve nada. */
-function copiarPose(bruto) {
+function copiarPose(bruto, dtSeg) {
+  if (hayCopia && dtSeg > 0) velPose = mezclarVelocidad(velocidadPose(bruto, dtSeg));
   for (let i = 0; i < N_PUNTOS; i++) {
     const b = bruto[i], s = poseVigente[i];
     s.x = b.x; s.y = b.y; s.z = b.z || 0; s.visibility = b.visibility;
   }
   hayCopia = true;
+}
+
+/* Cuánto se movió la pose, en tramos de torso por segundo.
+   Se usan diez puntos fijos —hombros, codos, muñecas, caderas, rodillas— en
+   vez de los 33: los de la cara aportan poco movimiento y los de manos y pies
+   son los que más tiemblan cuando el modelo duda, así que meterlos haría que
+   una persona quieta pareciera moverse. */
+function velocidadPose(bruto, dtSeg) {
+  const hx = (bruto[11].x + bruto[12].x) / 2, hy = (bruto[11].y + bruto[12].y) / 2;
+  const cx = (bruto[23].x + bruto[24].x) / 2, cy = (bruto[23].y + bruto[24].y) / 2;
+  let tramo = Math.hypot(cx - hx, cy - hy);
+  if (!(tramo > 0.02)) tramo = Math.hypot(bruto[11].x - bruto[12].x, bruto[11].y - bruto[12].y) * 1.55;
+  if (!(tramo > 0.02)) return 0;   // sin escala fiable, no se afirma nada
+
+  let suma = 0;
+  for (const i of PUNTOS_RITMO) {
+    const b = bruto[i], v = poseVigente[i];
+    suma += Math.hypot(b.x - v.x, b.y - v.y);
+  }
+  return suma / PUNTOS_RITMO.length / tramo / dtSeg;
+}
+
+/* Sube de golpe y baja despacio, y la asimetría es el punto: notar que alguien
+   se ha movido tiene que ser inmediato, mientras que concluir que se ha
+   quedado quieto puede esperar. Al revés, el primer gesto tras un rato quieto
+   llegaría con retraso. */
+const mezclarVelocidad = (v) => (v > velPose ? v : velPose + (v - velPose) * 0.25);
+
+/* El intervalo sale de la velocidad, interpolando entre los dos regímenes.
+
+   La interpolación se escribe `a*(1-t) + b*t` y no `a + (b-a)*t`, que es la
+   forma habitual y aquí está mal: la segunda no aterriza EXACTAMENTE en los
+   extremos. Con estos números, en t=1 daba 33.333333333333314 contra un
+   RITMO_MIN_MS de 33.333333333333336 — dos centésimas de femtosegundo por
+   debajo del suelo que la función promete. El error es inofensivo en magnitud
+   y no lo es como afirmación: un test que compruebe «nunca por debajo del
+   mínimo» falla, y tiene razón en fallar. Lo encontró ese test, no la vista. */
+function intervaloPorMovimiento() {
+  const t = Math.min(1, Math.max(0, (velPose - QUIETO_TPS) / (MOVIDO_TPS - QUIETO_TPS)));
+  return RITMO_MAX_MS * (1 - t) + RITMO_MIN_MS * t;
 }
 
 /* ═══ Gobernador térmico ═════════════════════════════════════════════════
@@ -1046,13 +1091,42 @@ function aplicarEscalon() {
    cada callback: al ralentí, con la cámara a 30 Hz y la inferencia a 5, la
    misma media móvil se contaba seis veces, así que las «12 mediciones
    seguidas» eran en realidad dos. */
+/* El denominador de la ocupación: el intervalo del RÉGIMEN en curso, que no es
+   el mismo que el intervalo del momento.
+
+   Hacen falta las dos ideas a la vez y por separado, porque tirar de una sola
+   rompe la otra. Contra el intervalo REAL —lo que hacía el código de la
+   compuerta— el gobernador persigue al control de ritmo: la persona se queda
+   quieta, el intervalo se alarga a 400 ms, la ocupación se hunde, el gobernador
+   sube de escalón y afina la celda… y al primer gesto vuelve a bajar. El tamaño
+   de los glifos cambiaría cada vez que alguien se mueve o se para. Un lazo de
+   control cuya salida SE VE no debe ir colgado de la variable rápida.
+
+   Contra `intervaloBase` a secas, el error es el opuesto y ya está documentado
+   en el comentario de OCUPACION_ALTA: al ralentí, con la sala vacía, se mira
+   cada 200 ms pero se dividiría por los 33 de un escalón 0, y el gobernador
+   degradaría por un gasto que no existe. Fue un bug real de este archivo.
+
+   El régimen distingue las dos cosas. `intervaloPorMovimiento()` cambia de un
+   segundo al siguiente: es rápido, y no entra aquí. El ralentí, en cambio, dura
+   lo que dure la sala vacía —IDLE_MS como mínimo— así que sí es un régimen, y
+   su intervalo es el denominador honesto mientras esté en vigor.
+
+   El `Math.max` no es decorativo, aunque hoy no cambie ningún resultado: el
+   ralentí es un SUELO, igual que el movimiento en la composición de `paso()`,
+   y el escalón sigue siendo el techo. Con la tabla de ESCALONES actual el
+   escalón más degradado son 125 ms y nunca pasa de los 200 del ralentí, así
+   que devolver INTERVALO_IDLE a secas daba el mismo número — por casualidad de
+   la tabla, no por construcción. Añádase un escalón de 4 Hz (250 ms) y esa
+   versión reintroduce el mismo bug que este comentario explica: repartir el
+   trabajo en 250 ms y dividirlo por 200. Lo encontró un test, no la vista. */
+function intervaloRegimen(ahora) {
+  const suelo = (ahora - ultimaPose > IDLE_MS) ? INTERVALO_IDLE : 0;
+  return Math.max(intervaloBase, suelo);
+}
+
 function gobernar(ahora) {
-  /* La sonda corre en CADA comprobación; la inferencia, solo en las que la
-     compuerta deja pasar. De ahí el factor `fraccionInfiere`: sin él, la
-     ocupación seguiría contando 50 ms por comprobación aunque la mayoría se
-     estuvieran saltando, y el gobernador degradaría por un gasto que ya no
-     existe. */
-  ocupacion = (msSonda + fraccionInfiere * msInferencia + msDibujo) / intervaloInferencia;
+  ocupacion = (msInferencia + msDibujo) / intervaloRegimen(ahora);
   if (ocupacion > OCUPACION_ALTA) { sobre++; bajo = 0; }
   else if (ocupacion < OCUPACION_BAJA) { bajo++; sobre = 0; }
   else { sobre = 0; bajo = 0; }
@@ -1064,102 +1138,6 @@ function gobernar(ahora) {
   } else if (bajo >= MUESTRAS_SUBIR && escalon > 0) {
     escalon--; bajo = 0; ultimoCambio = ahora; aplicarEscalon();
   }
-}
-
-/* ═══ Compuerta de movimiento ════════════════════════════════════════════
-   Se compara por BLOQUES y no píxel a píxel, y se resta la mediana de los
-   cambios antes de decidir. Ese detalle es el que hace la compuerta usable:
-   cuando el autoexposición de la cámara sube el brillo de todo el cuadro,
-   todos los bloques cambian por igual y la mediana absorbe ese desplazamiento
-   global; un brazo que se mueve altera unos pocos bloques y sobresale por
-   encima. Se toma el MÁXIMO del residuo y no la suma, para que mover solo una
-   mano dispare igual que mover el cuerpo entero.
-
-   El umbral no es una constante: se estima sobre el ruido que de verdad tiene
-   este sensor, como media más K desviaciones del residuo observado.
-
-   La primera versión rastreaba el PISO —el mínimo del residuo— y estaba mal.
-   Medido: con un ruido de ±8 unidades de luma, plausible en interior, la
-   compuerta disparaba en 25 de 40 comprobaciones con la escena quieta; a ±15,
-   en 35 de 40. El motivo es que el residuo es un MÁXIMO sobre 48 bloques, un
-   estadístico con cola alta: un umbral apoyado en su mínimo queda por debajo
-   de casi toda la distribución. Lo encontró un test, no el ojo.
-
-   El modelo de ruido se alimenta SOLO de las comprobaciones que da por
-   quietas. Si también se alimentara de los movimientos reales, cada gesto
-   subiría el umbral y la compuerta acabaría ciega. El precio es el rodaje:
-   durante las primeras SONDA_ARRANQUE comprobaciones aprende de todo, así que
-   si el usuario se mueve justo entonces el umbral arranca alto — el refresco
-   forzado cubre ese hueco.                                                */
-const NB_X = Math.floor(SONDA_W / SONDA_BLOQUE);
-const NB_Y = Math.floor(SONDA_H / SONDA_BLOQUE);
-const N_BLOQUES = NB_X * NB_Y;
-
-let sondaCtx2 = null;
-let bloquesPrev = null;
-const bloques = new Float32Array(N_BLOQUES);
-const deltas = new Float32Array(N_BLOQUES);
-let mediaRes = 0, desvRes = 0, nRuido = 0;
-let msSonda = 0;
-let nComprobadas = 0, nSaltadas = 0;
-let fraccionInfiere = 1;
-
-function prepararCompuerta() {
-  const c = document.createElement('canvas');
-  c.width = SONDA_W; c.height = SONDA_H;
-  sondaCtx2 = c.getContext('2d', { willReadFrequently: true, alpha: false });
-  bloquesPrev = null;
-  mediaRes = 0; desvRes = 0; nRuido = 0;
-}
-
-/* La DECISIÓN está separada de la captura a propósito: así se puede probar con
-   cuadros construidos a mano —ruido de sensor, un cambio global de exposición,
-   un solo bloque que se mueve— sin necesitar cámara ni navegador. Ver
-   tests/halftone-rasterizador.test.js. */
-function decidirMovimiento(d) {
-  bloques.fill(0);
-  for (let y = 0; y < NB_Y * SONDA_BLOQUE; y++) {
-    const by = ((y / SONDA_BLOQUE) | 0) * NB_X;
-    for (let x = 0; x < NB_X * SONDA_BLOQUE; x++) {
-      const i = (y * SONDA_W + x) * 4;
-      // Luma aproximada con enteros: sobra precisión para detectar movimiento.
-      bloques[by + ((x / SONDA_BLOQUE) | 0)] += (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
-    }
-  }
-  const porBloque = SONDA_BLOQUE * SONDA_BLOQUE;
-  for (let k = 0; k < N_BLOQUES; k++) bloques[k] /= porBloque;
-
-  if (!bloquesPrev) { bloquesPrev = Float32Array.from(bloques); return true; }
-
-  for (let k = 0; k < N_BLOQUES; k++) deltas[k] = Math.abs(bloques[k] - bloquesPrev[k]);
-  bloquesPrev.set(bloques);
-
-  // La mediana de los cambios ES el desplazamiento global de iluminación.
-  const orden = Float32Array.from(deltas).sort();
-  const global = orden[N_BLOQUES >> 1];
-  let residuo = 0;
-  for (let k = 0; k < N_BLOQUES; k++) {
-    const r = deltas[k] - global;
-    if (r > residuo) residuo = r;
-  }
-
-  const umbral = nRuido < 3
-    ? Infinity                                        // sin modelo aún: no decidir movimiento
-    : Math.max(SONDA_UMBRAL_MIN, mediaRes + SONDA_K * desvRes);
-  const movio = residuo > umbral;
-
-  if (!movio || nRuido < SONDA_ARRANQUE) {
-    nRuido++;
-    mediaRes += (residuo - mediaRes) * 0.08;
-    desvRes  += (Math.abs(residuo - mediaRes) - desvRes) * 0.08;
-  }
-  return movio;
-}
-
-/** ¿Cambió algo desde la última comprobación? Captura y delega la decisión. */
-function seMovio() {
-  sondaCtx2.drawImage(video, 0, 0, SONDA_W, SONDA_H);
-  return decidirMovimiento(sondaCtx2.getImageData(0, 0, SONDA_W, SONDA_H).data);
 }
 
 /* ═══ Medición ═══════════════════════════════════════════════════════════
@@ -1236,39 +1214,30 @@ function detenerBucle() {
 
 function paso(ahora) {
   let huboInferencia = false;
-  let saltoEsteTurno = false;
   const dt = Math.min(Math.max((ahora - ultimoPaso) / 1000, 1 / 240), 0.25);
   ultimoPaso = ahora;
 
   /* Dos relojes y no uno. `ultimaComprobacion` marca el ritmo al que se MIRA
-     el cuadro; `ultimaInferencia`, la última vez que de verdad se llamó al
-     detector. Con un solo reloj, saltarse una inferencia dejaría la condición
-     de intervalo cumplida para siempre y se comprobaría en cada callback. */
+     el cuadro; `ultimaInferencia`, la última vez que se llamó al detector.
+     Sin compuerta los dos coinciden, pero siguen separados porque
+     `ultimaInferencia` es la base de tiempo de la velocidad de la pose: si lo
+     moviera cualquier otra cosa, el denominador dejaría de corresponder al
+     desplazamiento que se mide contra `poseVigente`. */
   const cuadroNuevo = video.readyState >= 2 && video.currentTime !== ultimoTiempoVideo;
   if (cuadroNuevo && ahora - ultimaComprobacion >= intervaloInferencia) {
     ultimoTiempoVideo = video.currentTime;
     ultimaComprobacion = ahora;
 
-    /* La compuerta: 1 200 píxeles para decidir si vale la pena gastar los
-       ~50 ms del detector. Se fuerza la inferencia si todavía no hay ninguna
-       pose (la primera hay que encontrarla) y cada REFRESCO_MS pase lo que
-       pase, para que un falso «no se movió» no congele la silueta. */
-    const t0s = performance.now();
-    let movio = true;
-    try { movio = seMovio(); } catch { movio = true; }   // ante la duda, inferir
-    msSonda += (performance.now() - t0s - msSonda) * 0.1;
-    nComprobadas++;
-
-    const inferir = movio || !hayCopia || ahora - ultimaInferencia >= REFRESCO_MS;
-    fraccionInfiere += ((inferir ? 1 : 0) - fraccionInfiere) * 0.05;
-    huboInferencia = true;   // se muestrea por COMPROBACIÓN, inferida o no
-
-    if (!inferir) {
-      nSaltadas++;
-      saltoEsteTurno = true;
-      gobernar(ahora);
-    } else {
+    /* Se lee ANTES de pisar `ultimaInferencia`: este es el tiempo que ha
+       pasado desde la pose que hay en `poseVigente`, o sea el denominador de
+       la velocidad. El tope de 0.5 s es deliberadamente asimétrico. Tras un
+       hueco largo —pestaña oculta, atasco del hilo principal— dividir por el
+       hueco real subestimaría la velocidad y el primer gesto llegaría tarde;
+       dividir por 0.5 la sobreestima y cuesta, como mucho, una inferencia de
+       más. De los dos errores, el caro es el que se ve. */
+    const dtInf = Math.min(Math.max((ahora - ultimaInferencia) / 1000, 1 / 240), 0.5);
     ultimaInferencia = ahora;
+    huboInferencia = true;
 
     const t0 = performance.now();
     let res = null;
@@ -1290,7 +1259,7 @@ function paso(ahora) {
     const bruto = res?.landmarks?.[0];
     if (bruto && bruto.length >= N_PUNTOS) {
       decidirModoPresencia(bruto);
-      copiarPose(bruto);
+      copiarPose(bruto, dtInf);
       hayPose = true;
       atenuacion = 1;
       ultimaPose = ahora;
@@ -1299,7 +1268,6 @@ function paso(ahora) {
     }
     sucio = true;
     gobernar(ahora);
-    }
   }
 
   /* Al perder la pose la silueta se apaga en vez de desaparecer de golpe: un
@@ -1315,7 +1283,27 @@ function paso(ahora) {
      sigue encendido — y según el comentario de `visibilitychange`, ese es el
      consumo dominante. Los dos comentarios se contradecían; este es el que se
      ajusta a lo que hace el código. */
-  intervaloInferencia = (ahora - ultimaPose > IDLE_MS) ? INTERVALO_IDLE : intervaloBase;
+  /* Dos límites sobre el mismo número, y el orden importa: el control de
+     ritmo propone un SUELO (nunca más rápido que lo que pide el movimiento) y
+     el gobernador impone un TECHO (`intervaloBase`, nunca más rápido que lo
+     que aguanta el aparato). `Math.max` deja que el gobernador gane siempre,
+     que es lo que debe pasar: el calor no se negocia con el movimiento.
+
+     La misma forma que `intervaloRegimen`, y a propósito distinta en el
+     contenido: ahí la rama con persona delante es `intervaloBase` porque mide
+     capacidad sostenida; aquí es `intervaloPorMovimiento()` porque decide el
+     ritmo de este instante. Confundirlas es justo el error que separa las dos
+     funciones.
+
+     Queda una asimetría que conviene decir en voz alta en vez de esconderla:
+     con nadie delante se mira a 5 Hz (200 ms) y con alguien quieto a 2.5 Hz
+     (400 ms), o sea que la habitación vacía cuesta el doble que la persona
+     inmóvil. No es un descuido: los 200 ms son latencia para ENCONTRAR a
+     quien entra, y los 400 son para SEGUIR a quien ya está. Si al medir sale
+     que la habitación vacía es el caso dominante, el número a mover es
+     INTERVALO_IDLE — pero eso es una decisión con medición propia. */
+  const suelo = (ahora - ultimaPose > IDLE_MS) ? INTERVALO_IDLE : intervaloPorMovimiento();
+  intervaloInferencia = Math.max(intervaloBase, suelo);
 
   if (sucio) {
     const t1 = performance.now();
@@ -1329,8 +1317,9 @@ function paso(ahora) {
      este fotograma y no el del anterior. */
   if (midiendo && huboInferencia) {
     muestras.push({
-      red: msInferencia, dib: msDibujo, ocu: ocupacion, sonda: msSonda,
-      esc: escalon, glifos: ultimasGlifos, pose: hayPose, salto: saltoEsteTurno,
+      red: msInferencia, dib: msDibujo, ocu: ocupacion, vel: velPose,
+      iv: intervaloInferencia, hz: ESCALONES[escalon].hz,
+      esc: escalon, glifos: ultimasGlifos, pose: hayPose,
     });
   }
 
@@ -1378,7 +1367,7 @@ async function arrancar() {
     corriendo = true;
     suspendido = false;
     ultimoPaso = ultimaInferencia = ultimaComprobacion = ultimaPose = performance.now();
-    prepararCompuerta();
+    velPose = MOVIDO_TPS;   // arrancar deprisa: todavía no hay con qué comparar
     ultimoTiempoVideo = -1;
     $arranque.textContent = 'Detener cámara';
     $arranque.dataset.activo = '1';
@@ -1411,9 +1400,8 @@ function detener(mensaje = 'Detenido. La cámara está liberada.', clase = '') {
      acabó degradada arranca la próxima ya en el escalón máximo, con las
      medias móviles y el rango de profundidad de otra persona en otra luz. */
   escalon = 0; sobre = 0; bajo = 0; ultimoCambio = 0;
-  msInferencia = 0; msDibujo = 0; msSonda = 0;
-  nComprobadas = 0; nSaltadas = 0; fraccionInfiere = 1;
-  bloquesPrev = null; mediaRes = 0; desvRes = 0; nRuido = 0;
+  msInferencia = 0; msDibujo = 0; velPose = 0;
+  intervaloInferencia = intervaloBase;
   zBajo = -0.4; zAlto = 0.4;
   modoPresencia = 'probando'; framesProbados = 0;
   aplicarEscalon();
@@ -1480,7 +1468,7 @@ document.addEventListener('visibilitychange', () => {
           suspendido = false;
         }
         ultimoPaso = ultimaInferencia = ultimaComprobacion = performance.now();
-        prepararCompuerta();
+        velPose = MOVIDO_TPS;   // al volver, la pose guardada puede ser vieja
         ultimoTiempoVideo = -1;
         programar();
       } catch (e) {
@@ -1510,9 +1498,10 @@ function refrescarDiagnostico(pintadas) {
   if (ahora - ultimoDiag < 250) return;
   ultimoDiag = ahora;
   $diag.textContent =
-    `${delegado} · ${celda}px · ${dpr}× · ${ESCALONES[escalon].hz}Hz · ` +
+    `${delegado} · ${celda}px · ${dpr}× · ` +
+    `${ESCALONES[escalon].hz}→${(1000 / intervaloInferencia).toFixed(1)}Hz · ` +
     `red ${msInferencia.toFixed(1)}ms · pintar ${msDibujo.toFixed(1)}ms · ` +
-    `sonda ${msSonda.toFixed(2)}ms · saltadas ${nComprobadas ? Math.round((100 * nSaltadas) / nComprobadas) : 0}% · ` +
+    `vel ${velPose.toFixed(2)}t/s · ` +
     `ocupación ${(ocupacion * 100).toFixed(0)}% · ${pintadas} glifos · ` +
     `escalón ${escalon}/${ESCALONES.length - 1} · presencia ${modoPresencia} · ` +
     `glifos ${sondaEstado}`;
@@ -1565,9 +1554,9 @@ function cerrarMedicion() {
   const ocu = muestras.map((m) => m.ocu);
   const esc = muestras.map((m) => m.esc);
   const gl  = muestras.map((m) => m.glifos);
-  const son = muestras.map((m) => m.sonda);
-  const nSalt = muestras.filter((m) => m.salto).length;
-  const nInf = n - nSalt;
+  const vel = muestras.map((m) => m.vel);
+  const iv  = muestras.map((m) => m.iv);
+  const hz  = muestras.map((m) => m.hz);
   const pedido = new URLSearchParams(location.search).get('delegate');
   const fase = pedido?.toUpperCase() === 'CPU' ? 'pedido CPU' : 'pedido GPU (defecto)';
 
@@ -1576,27 +1565,26 @@ function cerrarMedicion() {
     `fase: ${fase} · delegado real: ${delegado}`,
     `aparato: ${navigator.userAgent}`,
     `lienzo: ${anchoCSS}x${altoCSS} css · dpr ${dpr} · celda ${celda}px · densidad ${DENSIDADES[config.densidad].nombre}`,
-    /* Antes esta línea decía «inferencias/s» y era falso: las muestras se
-       toman por COMPROBACIÓN, inferida o no. Las dos tasas se reportan ahora
-       por separado, porque la diferencia entre ellas ES el ahorro. */
-    `ventana: ${seg.toFixed(1)} s · ${n} comprobaciones (${(n / seg).toFixed(1)}/s)`
-      + ` · ${nInf} inferencias (${(nInf / seg).toFixed(1)}/s)`,
+    /* Una muestra por inferencia, ahora que no hay comprobaciones que no
+       infieran: esta tasa SÍ es la de llamadas al detector. */
+    `ventana: ${seg.toFixed(1)} s · ${n} inferencias (${(n / seg).toFixed(1)}/s)`,
     `pose presente: ${Math.round((100 * conPose) / n)} % de las muestras`
       + (conPose === 0 ? '   <-- NADIE EN CUADRO: esta medicion no vale' : ''),
     `red        mediana ${mediana(red).toFixed(1)} ms · p95 ${percentil(red, 0.95).toFixed(1)} ms`,
     `pintar     mediana ${mediana(dib).toFixed(1)} ms · p95 ${percentil(dib, 0.95).toFixed(1)} ms`,
-    `sonda      mediana ${mediana(son).toFixed(2)} ms por comprobacion`,
-    /* Contado DENTRO de la ventana. Antes se reportaban los contadores de
-       toda la sesión junto a medianas de 20 s: dos escalas en el mismo
-       informe, y el porcentaje no significaba lo que parecía. */
-    `compuerta  ${nSalt} de ${n} saltadas en la ventana`
-      + ` (${Math.round((100 * nSalt) / n)} %) · ruido ${mediaRes.toFixed(2)}±${desvRes.toFixed(2)}`,
-    /* El balance, que es la única cifra que dice si la compuerta vale la pena:
-       sin ella cada comprobación cuesta una inferencia; con ella, la sonda
-       siempre más la inferencia solo cuando pasa. */
-    `balance    sin compuerta ${mediana(red).toFixed(1)} ms/comprobacion`
-      + ` · con compuerta ${(mediana(son) + (nInf / n) * mediana(red)).toFixed(1)} ms`
-      + ` · ahorro ${Math.round(100 * (1 - (mediana(son) + (nInf / n) * mediana(red)) / mediana(red)))} %`,
+    `velocidad  mediana ${mediana(vel).toFixed(2)} torsos/s`
+      + ` · p95 ${percentil(vel, 0.95).toFixed(2)} · umbrales ${QUIETO_TPS}/${MOVIDO_TPS}`,
+    `ritmo      intervalo mediana ${Math.round(mediana(iv))} ms`
+      + ` (${(1000 / mediana(iv)).toFixed(1)} Hz) · techo mediana ${mediana(hz)} Hz`,
+    /* El ahorro, contado sobre lo que se pagó de verdad: el techo es el ritmo
+       al que el detector correría sin control de movimiento, la tasa lograda
+       es el que corrió. La diferencia son llamadas que no se hicieron, y cada
+       una cuesta una `red` entera. La sonda de píxeles ahorraba 19 % neto
+       porque su propia medición costaba 23.8 ms; esta no mide nada, así que
+       lo que ahorra lo ahorra entero. */
+    `balance    techo ${mediana(hz)} inf/s · logrado ${(n / seg).toFixed(1)} inf/s`
+      + ` · ahorro ${Math.round(100 * Math.max(0, 1 - n / seg / mediana(hz)))} %`
+      + ` (${((mediana(hz) - n / seg) * mediana(red)).toFixed(0)} ms de detector por segundo)`,
     `ocupacion  mediana ${Math.round(100 * mediana(ocu))} % · max ${Math.round(100 * Math.max(...ocu))} %`,
     `escalon    ${Math.min(...esc)} -> ${Math.max(...esc)} (final ${esc[esc.length - 1]})`,
     `glifos     mediana ${Math.round(mediana(gl))}`,
