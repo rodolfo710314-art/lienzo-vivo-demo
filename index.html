@@ -1401,10 +1401,15 @@ function detener(mensaje = 'Detenido. La cámara está liberada.', clase = '') {
      medias móviles y el rango de profundidad de otra persona en otra luz. */
   escalon = 0; sobre = 0; bajo = 0; ultimoCambio = 0;
   msInferencia = 0; msDibujo = 0; velPose = 0;
-  intervaloInferencia = intervaloBase;
   zBajo = -0.4; zAlto = 0.4;
   modoPresencia = 'probando'; framesProbados = 0;
   aplicarEscalon();
+  /* DESPUÉS de aplicarEscalon(), y no antes, porque es esa llamada la que pone
+     `intervaloBase` en el valor del escalón 0. Puesto antes leía el
+     `intervaloBase` de la toma anterior —125 ms si acabó en el escalón 5— y la
+     siguiente sesión arrancaba con 90 ms de retraso en su primera inferencia:
+     justo el arrastre de estado que el comentario de arriba dice evitar. */
+  intervaloInferencia = intervaloBase;
 
   $arranque.textContent = 'Iniciar cámara';
   $arranque.dataset.activo = '0';
