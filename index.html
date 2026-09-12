@@ -66,6 +66,10 @@
     header { text-align: center; }
     h1 { font-size: 0.95rem; color: var(--tinta); font-weight: 600; }
     header p { color: var(--apagado); font-size: 0.72rem; margin-top: 0.15rem; }
+    header summary {
+      color: var(--apagado); font-size: 0.7rem; cursor: pointer;
+      padding: 0.2rem; touch-action: manipulation;
+    }
 
     #lienzo {
       background: #000;
@@ -151,8 +155,14 @@
 
   <header>
     <h1>◍ Halftone de pose</h1>
-    <p>Ponte delante de la cámara. Ningún fotograma sale del teléfono;
-       el motor de visión y el modelo sí se descargan de un CDN.</p>
+    <!-- Plegado por defecto, y no es cosmética: medido en el aparato de
+         pruebas, esta explicación ocupaba ~110 px de los 454 que el cromo le
+         quitaba al lienzo. Se lee una vez; el lienzo se mira siempre. -->
+    <details>
+      <summary>Qué es esto y qué sale a la red</summary>
+      <p>Ponte delante de la cámara. Ningún fotograma sale del teléfono;
+         el motor de visión y el modelo sí se descargan de un CDN.</p>
+    </details>
   </header>
 
   <canvas id="lienzo" aria-label="Silueta de la pose dibujada con símbolos"></canvas>
@@ -172,7 +182,10 @@
 
   <div id="panel" hidden>
     <textarea id="informe" readonly aria-label="Informe de la medición, en texto plano"></textarea>
-    <div class="controles"><button id="btn-copiar" type="button">Copiar</button></div>
+    <div class="controles">
+      <button id="btn-copiar" type="button">Copiar</button>
+      <button id="btn-lectura" type="button">Medir lectura de cuadro</button>
+    </div>
   </div>
 
 <script type="module">
@@ -1452,6 +1465,7 @@ const $copiar    = document.getElementById('btn-copiar');
 const $estado    = document.getElementById('estado');
 const $diag      = document.getElementById('diagnostico');
 const $guia      = document.getElementById('guia');
+const $lectura   = document.getElementById('btn-lectura');
 
 function anunciar(texto, clase = '') {
   $estado.textContent = texto;
@@ -1506,6 +1520,15 @@ function detener(mensaje = 'Detenido. La cámara está liberada.', clase = '') {
      renglón contando hacia atrás y el lienzo dimensionado para una medición que
      ya no corría. */
   if (midiendo) cerrarMedicion();
+  if (midiendoLectura) {
+    /* El banco no se puede «cerrar» a mitad —sus promesas siguen vivas— pero sí
+       hay que devolver la pantalla, o parar la cámara durante el banco dejaba
+       el modo prueba puesto y el lienzo dimensionado para él. */
+    midiendoLectura = false;
+    document.body.classList.remove('midiendo');
+    $guia.textContent = '';
+    $lectura.disabled = false;
+  }
   corriendo = false;
   detenerBucle();
   cerrarCamara();
@@ -1835,6 +1858,269 @@ function cerrarMedicion() {
   ].filter((l) => l !== null).join('\n');
 }
 
+/* ═══ Banco de lectura de cuadro ══════════════════════════════════════════
+   La pregunta que decide si el «estado fijo de la habitación» es viable en la
+   web, y por qué esta medición existe.
+
+   La compuerta de píxeles se descartó por costar 23.8 ms por comprobación. Eso
+   se midió bien y se CONCLUYÓ mal: el coste no es de la idea, es de cómo la
+   implementé. `getImageData` sobre un canvas es un punto de SINCRONIZACIÓN —el
+   hilo principal se para a esperar que la GPU termine lo pendiente— y ese coste
+   no baja aunque leas 1 200 píxeles en vez de 300 000. Se midió con una sonda
+   de 40×30 y aun así costó 23.8 ms. La pista estaba ahí y no la leí: si el
+   coste no escala con los bytes, no es el copiado, es la espera.
+
+   WebCodecs no tiene esa espera. `VideoFrame.copyTo()` devuelve una promesa, y
+   el cuadro de una cámara suele llegar en memoria accesible por CPU de todas
+   formas — no hay que traerlo de vuelta de la GPU porque nunca estuvo solo
+   allí. En Chrome Android desde la 94, sin marcar experimental.
+
+   DOS MEDIDAS por ruta, y son preguntas distintas:
+
+   - COSTE POR LLAMADA: un lote entero cronometrado con UN solo par de relojes,
+     dividido entre el número de llamadas. Se hace así porque `performance.now()`
+     está deliberadamente engrosado por seguridad: cronometrar una llamada de
+     20 µs por separado devuelve 0.00 ms, que es lo que pasó en la primera
+     versión de este banco — las cuatro rutas dieron «bloqueo 0.00 ms» y el
+     veredicto dividía cero entre cero.
+
+   - IMPACTO REAL: una lectura por cuadro de cámara, que es como se usaría, y se
+     cuenta cuántos `requestAnimationFrame` pasan. Es la única medida que
+     responde «¿se atasca la interfaz?», y NO se puede tomar a la vez que el
+     lote: un bucle de `await` sobre promesas ya resueltas solo drena
+     microtareas y deja sin fotogramas al navegador por sí mismo. La primera
+     versión medía eso —su propio bucle— y daba 0 rAF/s en todas las rutas,
+     incluida la que no hacía nada de trabajo gráfico.
+
+   Un mapa de la habitación no necesita estar fresco al milisegundo: una ruta
+   con latencia alta y bloqueo bajo es una VICTORIA aquí. Con una sola cifra era
+   indistinguible de una derrota. */
+
+const BANCO_LOTE   = 60;     // llamadas por lote cronometrado
+const BANCO_LOTES  = 7;      // lotes por ruta, para poder dar mediana y recorrido
+const BANCO_REAL_MS = 2000;  // ventana de la medida de impacto
+let midiendoLectura = false;
+
+/* Rect par, por el submuestreo de croma de I420/NV12: con coordenadas o tamaños
+   impares, `copyTo` rechaza el rect en esos formatos. */
+const par = (v) => Math.max(2, Math.floor(v / 2) * 2);
+
+function rutaCanvas(w, h) {
+  const sonda = document.createElement('canvas');
+  sonda.width = w; sonda.height = h;
+  const c = sonda.getContext('2d', { willReadFrequently: true });
+  return async () => {
+    c.drawImage(video, 0, 0, w, h);
+    c.getImageData(0, 0, w, h);        // el punto de sincronización
+    return 0;
+  };
+}
+
+function rutaVideoFrame(recorte, formato) {
+  let bytes = 0;
+  const fn = async () => {
+    const vf = new VideoFrame(video);
+    try {
+      const op = {};
+      if (formato) op.format = formato;
+      if (recorte) {
+        op.rect = { x: 0, y: 0,
+                    width:  par(Math.min(recorte, vf.visibleRect.width)),
+                    height: par(Math.min(recorte, vf.visibleRect.height)) };
+      }
+      const buf = new Uint8Array(vf.allocationSize(op));
+      bytes = buf.length;
+      await vf.copyTo(buf, op);
+      return bytes;
+    } finally {
+      /* Sin esto se agota el pool de cuadros y la cámara deja de entregar. */
+      vf.close();
+    }
+  };
+  fn.bytes = () => bytes;
+  return fn;
+}
+
+/* Microsegundos por llamada: VARIOS lotes, y se devuelve mediana con recorrido.
+   Un solo lote no basta y esto no es celo estadistico — se comprobo: en dos
+   corridas seguidas del mismo banco en la misma maquina, la ruta C dio 8 us y
+   luego 61, y el veredicto se volteo con ella. Un banco cuyo fallo cambia entre
+   corridas es peor que ninguno, porque invita a quedarse con la corrida que
+   gusta. La mediana de siete lotes aguanta un pico; el recorrido lo ENSENA en
+   vez de esconderlo, que es la mitad que de verdad importa. */
+async function costePorLlamada(unaVez) {
+  for (let i = 0; i < 10; i++) await unaVez();   // calentamiento
+  const lotes = [];
+  for (let k = 0; k < BANCO_LOTES; k++) {
+    const t0 = performance.now();
+    for (let i = 0; i < BANCO_LOTE; i++) await unaVez();
+    lotes.push(((performance.now() - t0) * 1000) / BANCO_LOTE);
+  }
+  return { us: mediana(lotes), min: Math.min(...lotes), max: Math.max(...lotes) };
+}
+
+/** Una lectura por cuadro de cámara; cuántos rAF sobreviven. */
+async function impactoReal(unaVez) {
+  let nRaf = 0, nLect = 0, vivo = true;
+  const tic = () => { if (vivo) { nRaf++; requestAnimationFrame(tic); } };
+  requestAnimationFrame(tic);
+
+  const t0 = performance.now();
+  const siguiente = usaRVFC
+    ? (f) => video.requestVideoFrameCallback(f)
+    : (f) => requestAnimationFrame(f);
+
+  await new Promise((listo) => {
+    /* Tope de pared además de la condición de salida: si la cámara deja de
+       entregar cuadros a mitad, `requestVideoFrameCallback` no vuelve a llamar
+       nunca y el banco se quedaría colgado con la pantalla en modo prueba. */
+    const tope = setTimeout(() => { vivo = false; listo(); }, BANCO_REAL_MS + 3000);
+    const paso = async () => {
+      if (!vivo) return;
+      if (performance.now() - t0 >= BANCO_REAL_MS) {
+        vivo = false; clearTimeout(tope); listo(); return;
+      }
+      try { await unaVez(); nLect++; } catch { /* el lote ya reportó el fallo */ }
+      siguiente(paso);
+    };
+    siguiente(paso);
+  });
+
+  const dur = (performance.now() - t0) / 1000;
+  return { raf: nRaf / dur, lect: nLect / dur };
+}
+
+async function correrRuta(nombre, unaVez) {
+  try {
+    const c = await costePorLlamada(unaVez);
+    const imp = await impactoReal(unaVez);
+    return { nombre, ...c, ...imp, bytes: unaVez.bytes ? unaVez.bytes() : 0 };
+  } catch (e) {
+    return { nombre, fallo: `${e.name}: ${e.message}` };
+  }
+}
+
+async function medirLecturaCuadro() {
+  if (!corriendo) { anunciar('Arranca la cámara antes de medir la lectura.', 'aviso'); return; }
+  if (midiendoLectura) return;
+  midiendoLectura = true;
+  $lectura.disabled = true;
+  $panel.hidden = true;
+
+  document.body.classList.add('midiendo');
+  redimensionar();
+  $guia.innerHTML = '<b>Midiendo lectura de cuadro</b>'
+                  + '<small>La silueta se congela: el detector se para para no contaminar la medida. '
+                  + 'Unos 12 segundos. No toques la pantalla.</small>';
+
+  /* El bucle de pose se para de verdad: con él corriendo, sus ~51 ms por
+     inferencia se contarían como bloqueo de la ruta que tocara. */
+  detenerBucle();
+
+  const hayWebCodecs = typeof VideoFrame === 'function';
+  const anchoV = video.videoWidth || 0, altoV = video.videoHeight || 0;
+
+  /* Referencia: los rAF que entrega este aparato con el hilo libre. Sin ella,
+     «60/s» en una ruta no significa nada — podría ser el techo de la pantalla. */
+  const libre = await correrRuta('nada (referencia)', async () => 0);
+
+  const rutas = [libre];
+  rutas.push(await correrRuta('A canvas 40x30 getImageData', rutaCanvas(40, 30)));
+  if (hayWebCodecs) {
+    rutas.push(await correrRuta('B copyTo cuadro entero', rutaVideoFrame(null, null)));
+    rutas.push(await correrRuta('C copyTo rect 64x48', rutaVideoFrame(64, null)));
+    rutas.push(await correrRuta('D copyTo entero a RGBA', rutaVideoFrame(null, 'RGBA')));
+  }
+
+  document.body.classList.remove('midiendo');
+  $guia.textContent = '';
+  redimensionar();
+  if (corriendo) programar();
+  midiendoLectura = false;
+  $lectura.disabled = false;
+
+  const fila = (r) => r.fallo
+    ? `${r.nombre.padEnd(28)} FALLO  ${r.fallo}`
+    : `${r.nombre.padEnd(28)} ${r.us.toFixed(0).padStart(6)} us/llamada`
+      + ` (${r.min.toFixed(0)}-${r.max.toFixed(0)})`.padEnd(14)
+      + ` · ${r.lect.toFixed(1).padStart(5)} lect/s`
+      + ` · rAF ${r.raf.toFixed(0).padStart(3)}/s`
+      + (r.bytes ? ` · ${(r.bytes / 1024).toFixed(0)} KB` : '');
+
+  const de = (l) => rutas.find((r) => r.nombre.startsWith(l) && !r.fallo);
+  const A = de('A'), B = de('B'), C = de('C'), L = de('nada');
+  const v = [];
+  const pct = (r) => (L && L.raf > 0 ? (100 * r.raf) / L.raf : 0);
+
+  if (L) v.push(`hilo libre: ${L.raf.toFixed(0)} rAF/s es el techo de este aparato`);
+  if (A) v.push(`A conserva el ${pct(A).toFixed(0)} % de los rAF · ${A.us.toFixed(0)} us/llamada`);
+  if (B) v.push(`B conserva el ${pct(B).toFixed(0)} % de los rAF · ${B.us.toFixed(0)} us/llamada`);
+  if (C) v.push(`C conserva el ${pct(C).toFixed(0)} % de los rAF · ${C.us.toFixed(0)} us/llamada`);
+  /* A contra C, y no A contra B: las dos leen POCO (4 800 pixeles contra
+     3 072), que es la comparacion honesta. Compararla con B -el cuadro entero,
+     450 KB- mezclaba el coste del copiado con el de la espera y daba un
+     veredicto al reves. */
+  if (A && C) {
+    /* Con los recorridos solapados no se pronuncia veredicto. Dos rutas cuyos
+       min-max se cruzan no estan distinguidas por esta medicion, y decir cual
+       gana seria inventar una diferencia que los datos no sostienen. */
+    const solapan = C.min <= A.max && A.min <= C.max;
+    v.push(solapan
+      ? `SIN VEREDICTO: los recorridos de A (${A.min.toFixed(0)}-${A.max.toFixed(0)} us) y`
+        + ` C (${C.min.toFixed(0)}-${C.max.toFixed(0)} us) se solapan.`
+        + '\n           Esta medicion no las distingue. Repetir con el aparato en reposo.'
+      : C.us < A.us
+        ? `VEREDICTO: leer poco con copyTo cuesta ${(A.us / Math.max(C.us, 1e-9)).toFixed(1)}x`
+          + ' menos que con getImageData, y los recorridos no se solapan. Si esa razon'
+          + '\n           se sostiene en el telefono, la compuerta de pixeles se descarto por'
+          + '\n           la implementacion y no por la idea.'
+        : `VEREDICTO: copyTo NO mejora getImageData aqui`
+          + ` (${C.us.toFixed(0)} contra ${A.us.toFixed(0)} us, sin solape).`
+          + ' Por aqui la idea no se salva.');
+  }
+  if (B && C) {
+    const rb = B.bytes / Math.max(C.bytes, 1), rt = B.us / Math.max(C.us, 1e-9);
+    v.push(`escala: C lee ${rb.toFixed(0)}x menos bytes y cuesta ${rt.toFixed(1)}x menos.`
+      + (rt < 1.5 ? ' Coste FIJO por llamada: leer menos no ayuda.'
+                  : ' Escala con los bytes: conviene leer poco.'));
+  }
+  if (!hayWebCodecs) v.push('WebCodecs no existe en este navegador: solo hay ruta A.');
+  /* El aviso mas importante del informe, y por eso va al final: donde no hay GPU
+     de verdad, la ruta A no puede costar lo que costo en el telefono. */
+  if (A && A.us < 2000) {
+    v.push('');
+    v.push('CUIDADO CON ESTE INFORME si no sale de un telefono. En el Galaxy A34,');
+    v.push(`getImageData costo 23 800 us. Aqui ha costado ${A.us.toFixed(0)}: unas`);
+    v.push(`${(23800 / Math.max(A.us, 1e-9)).toFixed(0)} veces menos. La diferencia es que ese coste`);
+    v.push('es una transferencia GPU->CPU, y en un contenedor sin GPU real -SwiftShader,');
+    v.push('donde la GPU ES la CPU- esa frontera no existe y no hay nada que esperar.');
+    v.push('Lo que este informe si establece fuera del telefono es que la aritmetica del');
+    v.push('banco funciona: la referencia se comporta, el coste escala con los bytes y');
+    v.push('la conversion a RGBA cuesta de mas. La cifra que decide hay que traerla del');
+    v.push('aparato.');
+  }
+
+  $informe.value = [
+    'LIENZO VIVO · banco de lectura de cuadro',
+    `aparato: ${navigator.userAgent}`,
+    `video de la camara: ${anchoV}x${altoV} · WebCodecs: ${hayWebCodecs ? 'si' : 'no'}`,
+    `lote: ${BANCO_LOTE} llamadas · ventana de impacto: ${BANCO_REAL_MS} ms`,
+    '',
+    ...rutas.map(fila),
+    '',
+    '--- que dice esto ---',
+    ...v,
+    '',
+    'Para que sirve: si alguna ruta lee un cuadro sin hundir los rAF y por debajo',
+    'del milisegundo, un modelo fijo de la habitacion con deteccion de cambios es',
+    'viable en la web, y el detector de pose deja de correr en bucle para mirar',
+    'solo donde algo cambio. Si ninguna lo consigue, no es viable, y hay que',
+    'decirlo con estas cifras delante.',
+  ].join('\n');
+  $panel.hidden = false;
+  anunciar('Banco de lectura terminado. El informe está abajo.');
+}
+
 $medir.addEventListener('click', () => {
   if (!corriendo) { anunciar('Arranca la cámara antes de medir.', 'aviso'); return; }
   muestras = [];
@@ -1867,6 +2153,22 @@ $medir.addEventListener('click', () => {
     setTimeout(tic, 100);
   };
   tic();
+});
+
+$lectura.addEventListener('click', () => {
+  medirLecturaCuadro().catch((e) => {
+    /* Que el banco falle no puede dejar la página en modo prueba con el bucle
+       de pose parado: eso se vería como «la cámara se colgó». */
+    document.body.classList.remove('midiendo');
+    $guia.textContent = '';
+    redimensionar();
+    midiendoLectura = false;
+    $lectura.disabled = false;
+    if (corriendo) programar();
+    $panel.hidden = false;
+    $informe.value = `El banco de lectura fallo antes de terminar: ${e.name}: ${e.message}`;
+    anunciar('El banco de lectura falló. El detalle está en el informe.', 'error');
+  });
 });
 
 $copiar.addEventListener('click', async () => {
