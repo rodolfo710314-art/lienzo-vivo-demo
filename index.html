@@ -93,11 +93,17 @@
          página: por debajo del 4.5:1 de AA, justo en las cifras que este
          banco existe para enseñar. #78909c da 6.27:1. */
       color: #78909c; text-align: center;
-      /* Reserva el alto de tres líneas desde el principio. `altoCromo()` mide
+      /* Reserva el alto de CUATRO líneas desde el principio. `altoCromo()` mide
          al arrancar, cuando esta línea está vacía; sin la reserva, el cromo
          crecería al aparecer las cifras y el lienzo, ya dimensionado, se
-         saldría por abajo. */
-      min-height: 3.2em; letter-spacing: 0.02em;
+         saldría por abajo.
+
+         Eran tres, y al añadir `cam Nfps` la línea pasó de ~138 a ~150
+         caracteres: a 0.66rem sobre 304 px caben unos 47 por línea, así que
+         cruzó justo el límite de las tres. Cada campo nuevo del diagnóstico
+         paga este peaje — y el peaje se cobra en altura de lienzo, que en este
+         aparato ya es el recurso escaso. */
+      min-height: 4.2em; letter-spacing: 0.02em;
     }
 
     #panel[hidden] { display: none; }
