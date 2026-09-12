@@ -1195,6 +1195,20 @@ let asaRVFC = 0, asaRAF = 0;
 let ultimoTiempoVideo = -1, ultimaInferencia = 0, ultimaComprobacion = 0;
 let ultimaPose = 0, ultimoPaso = 0;
 
+/* Cuántos cuadros entrega la cámara de verdad, que resultó ser la cifra que
+   explicaba la segunda medición y no estaba a la vista. Medido: el techo del
+   gobernador pedía 12 Hz y se lograban 7.2, y la diferencia NO era del control
+   de ritmo — era que la cámara no daba cuadros suficientes y el intervalo se
+   cuantiza a los que hay. Sin este número, ese hueco se le atribuía al
+   mecanismo equivocado.
+
+   Lleva su propio marcador de tiempo de vídeo y no reutiliza
+   `ultimoTiempoVideo`, porque ese solo se actualiza cuando hay inferencia: al
+   ralentí se queda atrás y `cuadroNuevo` sigue siendo cierto en cada callback
+   aunque el vídeo no haya avanzado. Contar eso daría la tasa de callbacks, no
+   la de la cámara. */
+let tiempoVideoVisto = -1, nCuadros = 0, t0Cuadros = 0, fpsCamara = 0;
+
 function programar() {
   if (!corriendo) return;
   /* Cancelar antes de programar. Sin esto, un ciclo ocultar/mostrar durante
@@ -1223,6 +1237,15 @@ function paso(ahora) {
      `ultimaInferencia` es la base de tiempo de la velocidad de la pose: si lo
      moviera cualquier otra cosa, el denominador dejaría de corresponder al
      desplazamiento que se mide contra `poseVigente`. */
+  if (video.readyState >= 2 && video.currentTime !== tiempoVideoVisto) {
+    tiempoVideoVisto = video.currentTime;
+    nCuadros++;
+    if (ahora - t0Cuadros >= 1000) {
+      fpsCamara = (nCuadros * 1000) / (ahora - t0Cuadros);
+      nCuadros = 0; t0Cuadros = ahora;
+    }
+  }
+
   const cuadroNuevo = video.readyState >= 2 && video.currentTime !== ultimoTiempoVideo;
   if (cuadroNuevo && ahora - ultimaComprobacion >= intervaloInferencia) {
     ultimoTiempoVideo = video.currentTime;
@@ -1318,7 +1341,7 @@ function paso(ahora) {
   if (midiendo && huboInferencia) {
     muestras.push({
       red: msInferencia, dib: msDibujo, ocu: ocupacion, vel: velPose,
-      iv: intervaloInferencia, hz: ESCALONES[escalon].hz,
+      iv: intervaloInferencia, hz: ESCALONES[escalon].hz, cam: fpsCamara,
       esc: escalon, glifos: ultimasGlifos, pose: hayPose,
     });
   }
@@ -1368,7 +1391,8 @@ async function arrancar() {
     suspendido = false;
     ultimoPaso = ultimaInferencia = ultimaComprobacion = ultimaPose = performance.now();
     velPose = MOVIDO_TPS;   // arrancar deprisa: todavía no hay con qué comparar
-    ultimoTiempoVideo = -1;
+    ultimoTiempoVideo = tiempoVideoVisto = -1;
+    nCuadros = 0; t0Cuadros = performance.now(); fpsCamara = 0;
     $arranque.textContent = 'Detener cámara';
     $arranque.dataset.activo = '1';
     anunciar(`En marcha · el vídeo se procesa aquí y no sale del aparato.`);
@@ -1401,6 +1425,7 @@ function detener(mensaje = 'Detenido. La cámara está liberada.', clase = '') {
      medias móviles y el rango de profundidad de otra persona en otra luz. */
   escalon = 0; sobre = 0; bajo = 0; ultimoCambio = 0;
   msInferencia = 0; msDibujo = 0; velPose = 0;
+  nCuadros = 0; t0Cuadros = 0; fpsCamara = 0; tiempoVideoVisto = -1;
   zBajo = -0.4; zAlto = 0.4;
   modoPresencia = 'probando'; framesProbados = 0;
   aplicarEscalon();
@@ -1474,7 +1499,8 @@ document.addEventListener('visibilitychange', () => {
         }
         ultimoPaso = ultimaInferencia = ultimaComprobacion = performance.now();
         velPose = MOVIDO_TPS;   // al volver, la pose guardada puede ser vieja
-        ultimoTiempoVideo = -1;
+        ultimoTiempoVideo = tiempoVideoVisto = -1;
+        nCuadros = 0; t0Cuadros = performance.now(); fpsCamara = 0;
         programar();
       } catch (e) {
         anunciar(mensajeDeError(e), 'error');
@@ -1505,6 +1531,7 @@ function refrescarDiagnostico(pintadas) {
   $diag.textContent =
     `${delegado} · ${celda}px · ${dpr}× · ` +
     `${ESCALONES[escalon].hz}→${(1000 / intervaloInferencia).toFixed(1)}Hz · ` +
+    `cam ${fpsCamara.toFixed(0)}fps · ` +
     `red ${msInferencia.toFixed(1)}ms · pintar ${msDibujo.toFixed(1)}ms · ` +
     `vel ${velPose.toFixed(2)}t/s · ` +
     `ocupación ${(ocupacion * 100).toFixed(0)}% · ${pintadas} glifos · ` +
@@ -1562,6 +1589,14 @@ function cerrarMedicion() {
   const vel = muestras.map((m) => m.vel);
   const iv  = muestras.map((m) => m.iv);
   const hz  = muestras.map((m) => m.hz);
+  const cam = muestras.map((m) => m.cam).filter((v) => v > 0);
+  /* Las tres razones por las que se infiere menos que el techo, separadas.
+     `frenado` es la ÚNICA que es del control de ritmo: el suelo del movimiento
+     ganó al techo del escalón. Lo demás es la cámara y la cuantización. */
+  const frenado  = muestras.filter((m) => m.iv > 1000 / m.hz + 0.01).length;
+  const nQuieto  = muestras.filter((m) => m.vel <= QUIETO_TPS).length;
+  const nMovido  = muestras.filter((m) => m.vel >= MOVIDO_TPS).length;
+  const cicloReal = (mediana(red) * n) / (seg * 1000);
   const pedido = new URLSearchParams(location.search).get('delegate');
   const fase = pedido?.toUpperCase() === 'CPU' ? 'pedido CPU' : 'pedido GPU (defecto)';
 
@@ -1577,19 +1612,37 @@ function cerrarMedicion() {
       + (conPose === 0 ? '   <-- NADIE EN CUADRO: esta medicion no vale' : ''),
     `red        mediana ${mediana(red).toFixed(1)} ms · p95 ${percentil(red, 0.95).toFixed(1)} ms`,
     `pintar     mediana ${mediana(dib).toFixed(1)} ms · p95 ${percentil(dib, 0.95).toFixed(1)} ms`,
+    `camara     ${cam.length ? mediana(cam).toFixed(1) : '?'} cuadros/s entregados`
+      + ` · el techo del escalon pedia ${mediana(hz)}`
+      + (cam.length && mediana(cam) < mediana(hz) ? '   <-- LA CAMARA ES EL LIMITE, no el gobernador' : ''),
     `velocidad  mediana ${mediana(vel).toFixed(2)} torsos/s`
       + ` · p95 ${percentil(vel, 0.95).toFixed(2)} · umbrales ${QUIETO_TPS}/${MOVIDO_TPS}`,
+    `regimen    quieto ${Math.round((100 * nQuieto) / n)} %`
+      + ` · movido ${Math.round((100 * nMovido) / n)} %`
+      + ` · en rampa ${Math.round((100 * (n - nQuieto - nMovido)) / n)} %`
+      + (nQuieto === 0 ? '   <-- el regimen quieto NO se alcanzo: este informe no lo mide' : ''),
     `ritmo      intervalo mediana ${Math.round(mediana(iv))} ms`
       + ` (${(1000 / mediana(iv)).toFixed(1)} Hz) · techo mediana ${mediana(hz)} Hz`,
-    /* El ahorro, contado sobre lo que se pagó de verdad: el techo es el ritmo
-       al que el detector correría sin control de movimiento, la tasa lograda
-       es el que corrió. La diferencia son llamadas que no se hicieron, y cada
-       una cuesta una `red` entera. La sonda de píxeles ahorraba 19 % neto
-       porque su propia medición costaba 23.8 ms; esta no mide nada, así que
-       lo que ahorra lo ahorra entero. */
+    /* ESTA es la única cifra que el control de ritmo puede reclamar como suya:
+       las muestras donde su suelo ganó al techo del escalón. Antes esta línea
+       decía «ahorro N %» calculado como `1 - logrado/techo`, y era falso —
+       medido en un Galaxy A34, ese hueco del 40 % era casi todo cámara y
+       cuantización, con el control de ritmo frenando en una minoría de las
+       muestras. Atribuir un ahorro al mecanismo equivocado es peor que no
+       medirlo: invita a defender lo que no funciona. */
+    `frenado    el movimiento pidio ir mas despacio en ${frenado} de ${n} muestras`
+      + ` (${Math.round((100 * frenado) / n)} %)`
+      + (frenado === 0 ? '   <-- el control de ritmo no ahorro NADA en esta ventana' : ''),
     `balance    techo ${mediana(hz)} inf/s · logrado ${(n / seg).toFixed(1)} inf/s`
-      + ` · ahorro ${Math.round(100 * Math.max(0, 1 - n / seg / mediana(hz)))} %`
-      + ` (${((mediana(hz) - n / seg) * mediana(red)).toFixed(0)} ms de detector por segundo)`,
+      + ` · ciclo de trabajo REAL ${Math.round(100 * cicloReal)} %`,
+    /* La ocupación que ve el gobernador contra el ciclo de trabajo de verdad.
+       Si se separan, el gobernador está degradando la imagen por un gasto que
+       no existe — o al contrario. Medido: 62 % informado contra 37 % real. */
+    `contraste  ocupacion que ve el gobernador ${Math.round(100 * mediana(ocu))} %`
+      + ` vs ciclo real ${Math.round(100 * cicloReal)} %`
+      + (Math.abs(mediana(ocu) - cicloReal) > 0.1
+          ? `   <-- se separan ${(mediana(ocu) / Math.max(cicloReal, 1e-9)).toFixed(2)}x: el denominador no es el intervalo real`
+          : ''),
     `ocupacion  mediana ${Math.round(100 * mediana(ocu))} % · max ${Math.round(100 * Math.max(...ocu))} %`,
     `escalon    ${Math.min(...esc)} -> ${Math.max(...esc)} (final ${esc[esc.length - 1]})`,
     `glifos     mediana ${Math.round(mediana(gl))}`,
