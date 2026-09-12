@@ -41,6 +41,28 @@
       -webkit-user-select: none; user-select: none;
     }
 
+    /* La prueba guiada se lleva la pantalla entera. Medido en el aparato de
+       pruebas: con la cabecera, siete botones, el estado y el diagnóstico
+       puestos, `altoCromo()` devolvía 454 px de 582 —el 78 %— y al lienzo le
+       quedaban 128 px de alto; con el candado de 4/3, eso le recortaba también
+       el ancho a 171. Durante la medición no hace falta ninguno de esos
+       controles: hace falta ver la silueta y leer una instrucción. */
+    #guia { display: none; }
+    body.midiendo #guia {
+      display: block; text-align: center;
+      font-size: 1.05rem; font-weight: 600; line-height: 1.35;
+      color: #e0f2f1; min-height: 2.7em; max-width: 100%;
+    }
+    body.midiendo #guia b { color: var(--tinta); }
+    body.midiendo #guia small {
+      display: block; font-weight: 400; font-size: 0.72rem; color: var(--apagado);
+    }
+    body.midiendo > header,
+    body.midiendo > .controles,
+    body.midiendo > #estado,
+    body.midiendo > #diagnostico,
+    body.midiendo > #panel { display: none; }
+
     header { text-align: center; }
     h1 { font-size: 0.95rem; color: var(--tinta); font-weight: 600; }
     header p { color: var(--apagado); font-size: 0.72rem; margin-top: 0.15rem; }
@@ -125,6 +147,8 @@
   </style>
 </head>
 <body>
+  <p id="guia" role="status" aria-live="assertive"></p>
+
   <header>
     <h1>◍ Halftone de pose</h1>
     <p>Ponte delante de la cámara. Ningún fotograma sale del teléfono;
@@ -486,10 +510,30 @@ function reservarRejilla() {
 function altoCromo() {
   const cs = getComputedStyle(document.body);
   const hueco = parseFloat(cs.rowGap) || 0;
-  const hijos = [...document.body.children];
+  /* Solo los hijos VISIBLES, y los huecos que de verdad existen. Un hijo con
+     `display:none` no participa en el flex, así que no genera hueco: contarlo
+     sobreestimaba el cromo en ~48 px durante la prueba guiada, donde casi todo
+     está oculto. Sobreestimar es seguro —el lienzo sale más pequeño, no se
+     desborda— pero hacía falsa la cuenta que esta función existe para dar. */
+  const otros = [];
+  for (const el of document.body.children) {
+    if (el === lienzo) continue;
+    /* El panel del informe queda fuera del cómputo, y no es una excepción
+       cómoda: es un resultado que se lee y se copia UNA vez, no parte de la
+       disposición en marcha. Contándolo, al cerrar la prueba el lienzo se
+       desplomaba de 304×228 al suelo de 160×120 —con la cámara todavía
+       encendida, gastando una inferencia entera para dibujar una miniatura—
+       y volvía a hacerlo en cada rotación de pantalla con el informe abierto.
+       Se deja alto y la página se desplaza para alcanzarlo. */
+    if (el.id === 'panel') continue;   // por id: `$panel` se declara 900 líneas más abajo
+    const h = el.getBoundingClientRect().height;
+    if (h > 0) otros.push(h);
+  }
   let suma = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
-  for (const el of hijos) if (el !== lienzo) suma += el.getBoundingClientRect().height;
-  return suma + hueco * Math.max(0, hijos.length - 1) + 8;
+  for (const h of otros) suma += h;
+  /* `otros.length` y no `otros.length - 1`: el lienzo también cuenta como
+     elemento visible, así que hay un hueco más que elementos en `otros`. */
+  return suma + hueco * otros.length + 8;
 }
 
 function redimensionar() {
@@ -1162,7 +1206,42 @@ function gobernar(ahora) {
      · la tasa de inferencia REALMENTE lograda, que puede ser mucho menor que
        la pedida si el aparato no da abasto. Sin ese dato, una ocupación baja
        se lee como holgura cuando puede ser rendición.                     */
-const VENTANA_MS = 20000;
+/* El guion de la prueba, que antes estaba en la cabeza del operador.
+   La segunda medición en el Galaxy A34 lo dejó claro: la instrucción iba por
+   chat —«muévete la mitad del tiempo y quédate quieto la otra»— y salió una
+   velocidad mediana de 1.06 torsos/s, el DOBLE del umbral de «movido». O sea
+   que el régimen quieto no se alcanzó nunca, y solo se supo después, leyendo el
+   informe. Un banco que depende de que alguien recuerde un guion no mide lo que
+   cree medir.
+
+   Ahora la página dirige y cada muestra queda marcada con su fase, así que
+   «quieto» y «movido» se miden POR CONSTRUCCIÓN en vez de deducirse de una
+   mediana. `ajuste` se descarta del informe: son los segundos en que la persona
+   se está colocando, y sus cifras no son de ningún régimen.
+
+   El orden termina en movimiento a propósito: la transición quieto→movido es
+   donde el suavizado asimétrico tiene que demostrar que reacciona de golpe, y
+   es la única que se puede cronometrar contra una señal conocida. */
+const FASES = [
+  { ms: 3000, etiqueta: 'ajuste', texto: 'Colócate en el cuadro',
+    nota: 'De lado a lado si hace falta, hasta verte la silueta' },
+  { ms: 6000, etiqueta: 'movido', texto: '▶ &nbsp;MUÉVETE',
+    nota: 'Brazos, torso, un paso a cada lado' },
+  { ms: 6000, etiqueta: 'quieto', texto: '■ &nbsp;QUIETO',
+    nota: 'Sin mover nada. Apoya el teléfono si puedes: si se mueve la cámara, la pose se mueve con ella' },
+  { ms: 5000, etiqueta: 'movido', texto: '▶ &nbsp;MUÉVETE otra vez',
+    nota: 'Empieza YA: aquí se cronometra cuánto tarda el ritmo en subir' },
+];
+const VENTANA_MS = FASES.reduce((t, f) => t + f.ms, 0);
+const T_ULTIMA_FASE = VENTANA_MS - FASES[FASES.length - 1].ms;
+
+/* Qué fase corre en el milisegundo `t` desde el inicio de la ventana. */
+function faseEn(t) {
+  let acc = 0;
+  for (const f of FASES) { acc += f.ms; if (t < acc) return f; }
+  return FASES[FASES.length - 1];
+}
+
 let midiendo = false;
 let muestras = [];
 let t0Medicion = 0;
@@ -1349,6 +1428,10 @@ function paso(ahora) {
       red: msInferencia, dib: msDibujo, ocu: ocupacion, vel: velPose,
       iv: intervaloInferencia, hz: ESCALONES[escalon].hz, cam: fpsCamara,
       esc: escalon, glifos: ultimasGlifos, pose: hayPose,
+      /* Calculada aquí y no en el temporizador de 250 ms: en un límite de fase
+         esa granularidad etiquetaría mal hasta un cuarto de segundo de
+         muestras, que a 12 Hz son tres. */
+      t: ahora - t0Medicion, fase: faseEn(ahora - t0Medicion).etiqueta,
     });
   }
 
@@ -1368,6 +1451,7 @@ const $informe   = document.getElementById('informe');
 const $copiar    = document.getElementById('btn-copiar');
 const $estado    = document.getElementById('estado');
 const $diag      = document.getElementById('diagnostico');
+const $guia      = document.getElementById('guia');
 
 function anunciar(texto, clase = '') {
   $estado.textContent = texto;
@@ -1416,6 +1500,12 @@ async function arrancar() {
 }
 
 function detener(mensaje = 'Detenido. La cámara está liberada.', clase = '') {
+  /* ANTES de reiniciar el estado, porque el informe lee `modoPresencia` y
+     `haloActivo` y el bloque de reinicio de más abajo los pisa. Sin esto, parar
+     la cámara a mitad de prueba dejaba la pantalla en modo prueba con el
+     renglón contando hacia atrás y el lienzo dimensionado para una medición que
+     ya no corría. */
+  if (midiendo) cerrarMedicion();
   corriendo = false;
   detenerBucle();
   cerrarCamara();
@@ -1576,15 +1666,44 @@ function cerrarMedicion() {
   midiendo = false;
   $medir.disabled = false;
   $medir.textContent = 'Medir 20 s';
+  /* Devolver la pantalla, y `redimensionar()` otra vez por el mismo motivo que
+     al entrar: el lienzo tiene que volver a caber con el cromo puesto. El panel
+     se revela DESPUÉS, aunque `altoCromo()` ya lo excluya: así el orden del
+     código dice lo mismo que la exclusión, y si alguien quita una de las dos
+     cosas la otra sigue sosteniendo el caso. */
+  document.body.classList.remove('midiendo');
+  $guia.textContent = '';
+  redimensionar();
   $panel.hidden = false;
 
-  const seg = (performance.now() - t0Medicion) / 1000;
-  const n = muestras.length;
-  if (!n) {
+  if (!muestras.length) {
     $informe.value = 'Sin muestras: el detector no llegó a correr en esta ventana. '
                    + '¿Estaba la cámara en marcha?';
     return;
   }
+
+  /* Las muestras de `ajuste` fuera: son los segundos en que la persona se está
+     colocando y no pertenecen a ningún régimen. Se dice cuántas se tiran.
+
+     Y `n` y `seg` se recalculan DESPUÉS de tirarlas, las dos. Puestos antes,
+     el informe daba 54 inferencias en 20.0 s mientras todas sus medianas
+     salían de 45 muestras: dos denominadores en el mismo texto, que es el
+     mismo error que ya se corrigió dos veces en este archivo —comprobaciones
+     contadas como inferencias, y contadores de sesión junto a medianas de 20 s.
+     A la tercera conviene escribirlo: cuando se filtra una muestra hay que
+     mover TODOS los denominadores, no solo el que se mira. */
+  const nAjuste = muestras.filter((m) => m.fase === 'ajuste').length;
+  muestras = muestras.filter((m) => m.fase !== 'ajuste');
+  if (!muestras.length) {
+    $informe.value = `Sin muestras utiles: las ${nAjuste} que hubo caen en la fase `
+                   + 'de ajuste. La camara no llego a entregar cuadros suficientes.';
+    return;
+  }
+
+  const msAjuste = FASES.filter((f) => f.etiqueta === 'ajuste')
+                        .reduce((t, f) => t + f.ms, 0);
+  const seg = (performance.now() - t0Medicion - msAjuste) / 1000;
+  const n = muestras.length;
 
   const conPose = muestras.filter((m) => m.pose).length;
   const red = muestras.map((m) => m.red);
@@ -1603,6 +1722,31 @@ function cerrarMedicion() {
   const nQuieto  = muestras.filter((m) => m.vel <= QUIETO_TPS).length;
   const nMovido  = muestras.filter((m) => m.vel >= MOVIDO_TPS).length;
   const cicloReal = (mediana(red) * n) / (seg * 1000);
+  /* Por fase, que es la razón de ser de la prueba guiada: el ahorro del control
+     de ritmo solo existe en `quieto`, y compararlo con `movido` medido en la
+     misma ventana y el mismo aparato es la única comparación limpia. */
+  const porFase = (etq) => {
+    const ms = muestras.filter((m) => m.fase === etq);
+    if (!ms.length) return null;
+    const dur = FASES.filter((f) => f.etiqueta === etq).reduce((t, f) => t + f.ms, 0) / 1000;
+    return {
+      n: ms.length, tasa: ms.length / dur,
+      vel: mediana(ms.map((m) => m.vel)),
+      iv: mediana(ms.map((m) => m.iv)),
+      red: mediana(ms.map((m) => m.red)),
+      pose: Math.round((100 * ms.filter((m) => m.pose).length) / ms.length),
+    };
+  };
+  const fQ = porFase('quieto'), fM = porFase('movido');
+
+  /* Cuánto tarda el ritmo en subir cuando la persona vuelve a moverse: la
+     primera muestra de la última fase cuyo intervalo baja al techo del escalón.
+     INCLUYE la reacción humana al renglón, que no se puede separar — así que es
+     un techo del retardo del mecanismo, no su medida. */
+  const trasSenal = muestras.filter((m) => m.t >= T_ULTIMA_FASE);
+  const despierta = trasSenal.find((m) => m.iv <= 1000 / m.hz + 0.01);
+  const msReaccion = despierta ? Math.round(despierta.t - T_ULTIMA_FASE) : null;
+
   const pedido = new URLSearchParams(location.search).get('delegate');
   const fase = pedido?.toUpperCase() === 'CPU' ? 'pedido CPU' : 'pedido GPU (defecto)';
 
@@ -1616,6 +1760,41 @@ function cerrarMedicion() {
     `ventana: ${seg.toFixed(1)} s · ${n} inferencias (${(n / seg).toFixed(1)}/s)`,
     `pose presente: ${Math.round((100 * conPose) / n)} % de las muestras`
       + (conPose === 0 ? '   <-- NADIE EN CUADRO: esta medicion no vale' : ''),
+    `descartadas: ${nAjuste} muestras de la fase de ajuste`,
+    '',
+    '--- por fase, que es para lo que sirve la prueba guiada ---',
+    fM ? `movido     ${fM.n} muestras · ${fM.tasa.toFixed(1)} inf/s · vel ${fM.vel.toFixed(2)} t/s`
+         + ` · intervalo ${Math.round(fM.iv)} ms · pose ${fM.pose} %`
+       : 'movido     sin muestras',
+    fQ ? `quieto     ${fQ.n} muestras · ${fQ.tasa.toFixed(1)} inf/s · vel ${fQ.vel.toFixed(2)} t/s`
+         + ` · intervalo ${Math.round(fQ.iv)} ms · pose ${fQ.pose} %`
+       : 'quieto     sin muestras',
+    /* ESTA es la cifra que la segunda medicion no pudo dar: el ahorro del
+       control de ritmo, medido donde tiene que existir, contra el mismo aparato
+       en la misma ventana. Si sale ~0 %, el mecanismo no sirve en este telefono
+       y hay que decirlo. */
+    /* Sin `Math.max(0, ...)` maquillando el resultado: si quieto hizo MAS
+       llamadas que movido, eso se dice, porque significa que el mecanismo no
+       funciono en este aparato. Antes el porcentaje iba recortado a 0 y los
+       milisegundos no, asi que salia «AHORRO 0 % (-105 ms)» -- una cifra
+       negativa bajo una etiqueta que promete lo contrario. */
+    !(fQ && fM) ? 'AHORRO     no calculable: falta una de las dos fases'
+      : fQ.tasa >= fM.tasa
+        ? `AHORRO     NINGUNO: quieto hizo ${fQ.tasa.toFixed(1)} inf/s contra ${fM.tasa.toFixed(1)} en movido.`
+          + '\n           El control de ritmo no freno. Ver la linea `frenado` y la de `camara`.'
+        : `AHORRO     quieto ${fQ.tasa.toFixed(1)} inf/s contra movido ${fM.tasa.toFixed(1)}`
+          + ` = ${Math.round(100 * (1 - fQ.tasa / fM.tasa))} % menos llamadas`
+          + ` (${Math.round((fM.tasa - fQ.tasa) * fM.red)} ms de detector por segundo)`,
+    (fQ && fQ.vel > QUIETO_TPS)
+      ? `           OJO: la velocidad en quieto fue ${fQ.vel.toFixed(2)}, por encima del umbral ${QUIETO_TPS}.`
+        + '\n           La camara se movio, o el umbral esta demasiado bajo. Apoya el telefono y repite.'
+      : null,
+    msReaccion !== null
+      ? `reaccion   ${msReaccion} ms desde la senal hasta volver al techo`
+        + ' (incluye el tiempo de reaccion de la persona)'
+      : 'reaccion   el ritmo no volvio al techo en la ultima fase',
+    '',
+    '--- toda la ventana ---',
     `red        mediana ${mediana(red).toFixed(1)} ms · p95 ${percentil(red, 0.95).toFixed(1)} ms`,
     `pintar     mediana ${mediana(dib).toFixed(1)} ms · p95 ${percentil(dib, 0.95).toFixed(1)} ms`,
     `camara     ${cam.length ? mediana(cam).toFixed(1) : '?'} cuadros/s entregados`
@@ -1653,7 +1832,7 @@ function cerrarMedicion() {
     `escalon    ${Math.min(...esc)} -> ${Math.max(...esc)} (final ${esc[esc.length - 1]})`,
     `glifos     mediana ${Math.round(mediana(gl))}`,
     `glifos sonda: ${sondaEstado} · presencia: ${modoPresencia} · halo: ${haloActivo ? 'si' : 'no'}`,
-  ].join('\n');
+  ].filter((l) => l !== null).join('\n');
 }
 
 $medir.addEventListener('click', () => {
@@ -1663,13 +1842,29 @@ $medir.addEventListener('click', () => {
   midiendo = true;
   $medir.disabled = true;
   $panel.hidden = true;
-  anunciar('Midiendo. Muévete delante de la cámara: quieto, la inferencia baja al ralentí y la medida no sirve.');
+
+  /* La clase primero y `redimensionar()` después, en ese orden: la función mide
+     el cromo con `getBoundingClientRect()`, así que necesita que el CSS ya haya
+     ocultado los controles. Al revés mediría el cromo de antes y el lienzo
+     seguiría con 128 px de alto durante toda la prueba. */
+  document.body.classList.add('midiendo');
+  redimensionar();
+
+  /* Cada 100 ms y no cada 250: el renglón lleva una cuenta atrás por segundo, y
+     a 250 ms el número visible se salta valores de vez en cuando. Son diez
+     escrituras de texto por segundo sobre un elemento — frente a los ~51 ms de
+     una inferencia, no entra en el presupuesto. */
   const tic = () => {
     if (!midiendo) return;
-    const queda = VENTANA_MS - (performance.now() - t0Medicion);
-    if (queda <= 0) { cerrarMedicion(); return; }
-    $medir.textContent = `Midiendo… ${Math.ceil(queda / 1000)} s`;
-    setTimeout(tic, 250);
+    const t = performance.now() - t0Medicion;
+    if (t >= VENTANA_MS) { cerrarMedicion(); return; }
+
+    let acc = 0, fase = FASES[0];
+    for (const f of FASES) { acc += f.ms; if (t < acc) { fase = f; break; } }
+    const quedaFase = Math.ceil((acc - t) / 1000);
+    $guia.innerHTML = `<b>${fase.texto}</b> &nbsp;${quedaFase}s`
+                    + `<small>${fase.nota} · quedan ${Math.ceil((VENTANA_MS - t) / 1000)}s de prueba</small>`;
+    setTimeout(tic, 100);
   };
   tic();
 });
